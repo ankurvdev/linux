@@ -116,6 +116,16 @@ static void msm_disp_capture_atomic_state(struct msm_disp_state *disp_state)
 
 	ddev = disp_state->drm_dev;
 
+	/*
+	 * The CRTC, plane and connector states only exist once the mode config
+	 * has been reset, shortly before the device is registered. An IOMMU
+	 * fault (e.g. from a bootloader splash still being scanned out) can
+	 * request a snapshot before that; duplicating the state would then
+	 * dereference NULL with all modeset locks held.
+	 */
+	if (!ddev->registered)
+		return;
+
 	drm_modeset_acquire_init(&ctx, 0);
 
 	while (drm_modeset_lock_all_ctx(ddev, &ctx) != 0)
