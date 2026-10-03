@@ -999,7 +999,13 @@ static int smb_probe(struct platform_device *pdev)
 		return dev_err_probe(chip->dev, rc,
 				     "Failed to init status change work\n");
 
-	rc = (chip->batt_info->voltage_max_design_uv - 3487500) / 7500 + 1;
+	/* FLOAT_VOLTAGE_CFG = 3.4875 V + n * 7.5 mV, up to 4.92 V; never round up */
+	if (chip->batt_info->voltage_max_design_uv < 3487500 ||
+	    chip->batt_info->voltage_max_design_uv > 4920000)
+		return dev_err_probe(chip->dev, -EINVAL,
+				     "Missing or invalid battery voltage-max-design-microvolt\n");
+
+	rc = (chip->batt_info->voltage_max_design_uv - 3487500) / 7500;
 	rc = regmap_update_bits(chip->regmap, chip->base + FLOAT_VOLTAGE_CFG,
 				FLOAT_VOLTAGE_SETTING_MASK, rc);
 	if (rc < 0)
