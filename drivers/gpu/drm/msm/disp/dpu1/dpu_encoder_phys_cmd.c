@@ -161,6 +161,13 @@ static void dpu_encoder_phys_cmd_atomic_mode_set(
 		phys_enc->irq[INTR_IDX_RDPTR] = phys_enc->hw_pp->caps->intr_rdptr;
 
 	phys_enc->irq[INTR_IDX_UNDERRUN] = phys_enc->hw_intf->cap->intr_underrun;
+
+	/*
+	 * Stop autorefresh left running by the bootloader (continuous splash)
+	 * before the bridges' pre_enable powers up DSI and initializes the
+	 * panel; doing it only at the first kickoff is too late.
+	 */
+	dpu_encoder_phys_cmd_enable_te(phys_enc);
 }
 
 static int _dpu_encoder_phys_cmd_handle_ppdone_timeout(
