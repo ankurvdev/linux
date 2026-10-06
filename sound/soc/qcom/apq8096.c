@@ -1,16 +1,44 @@
 // SPDX-License-Identifier: GPL-2.0
 // Copyright (c) 2018, Linaro Limited
 
+#include <dt-bindings/sound/qcom,q6afe.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <sound/soc.h>
 #include <sound/soc-dapm.h>
 #include <sound/pcm.h>
+#include <sound/pcm_params.h>
 #include "common.h"
+#include "qdsp6/q6afe.h"
 
 #define SLIM_MAX_TX_PORTS 16
 #define SLIM_MAX_RX_PORTS 16
 #define WCD9335_DEFAULT_MCLK_RATE	9600000
+/* 48 kHz, 2 slots of 16 bits */
+#define MI2S_BCLK_RATE			1536000
+#define MI2S_COUNT			4
+
+struct apq8096_snd_data {
+	/* Bit clock users per MI2S interface (RX and TX share the clock) */
+	unsigned int mi2s_clk_count[MI2S_COUNT];
+};
+
+static const unsigned int apq8096_mi2s_bclk_ids[MI2S_COUNT] = {
+	Q6AFE_LPASS_CLK_ID_PRI_MI2S_IBIT,
+	Q6AFE_LPASS_CLK_ID_SEC_MI2S_IBIT,
+	Q6AFE_LPASS_CLK_ID_TER_MI2S_IBIT,
+	Q6AFE_LPASS_CLK_ID_QUAD_MI2S_IBIT,
+};
+
+static int apq8096_mi2s_index(unsigned int dai_id)
+{
+	switch (dai_id) {
+	case PRIMARY_MI2S_RX ... QUATERNARY_MI2S_TX:
+		return (dai_id - PRIMARY_MI2S_RX) / 2;
+	default:
+		return -EINVAL;
+	}
+}
 
 static int apq8096_be_hw_params_fixup(struct snd_soc_pcm_runtime *rtd,
 				      struct snd_pcm_hw_params *params)
@@ -19,9 +47,16 @@ static int apq8096_be_hw_params_fixup(struct snd_soc_pcm_runtime *rtd,
 					SNDRV_PCM_HW_PARAM_RATE);
 	struct snd_interval *channels = hw_param_interval(params,
 					SNDRV_PCM_HW_PARAM_CHANNELS);
+	struct snd_mask *fmt = hw_param_mask(params, SNDRV_PCM_HW_PARAM_FORMAT);
 
 	rate->min = rate->max = 48000;
 	channels->min = channels->max = 2;
+
+	/* The MI2S bit clock is set up for 16-bit samples */
+	if (apq8096_mi2s_index(snd_soc_rtd_to_cpu(rtd, 0)->id) >= 0) {
+		snd_mask_none(fmt);
+		snd_mask_set_format(fmt, SNDRV_PCM_FORMAT_S16_LE);
+	}
 
 	return 0;
 }
@@ -59,7 +94,59 @@ end:
 	return ret;
 }
 
+static int apq8096_snd_startup(struct snd_pcm_substream *substream)
+{
+	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
+	struct apq8096_snd_data *data = snd_soc_card_get_drvdata(rtd->card);
+	struct snd_soc_dai *cpu_dai = snd_soc_rtd_to_cpu(rtd, 0);
+	struct snd_soc_dai *codec_dai;
+	int index, ret, i;
+
+	index = apq8096_mi2s_index(cpu_dai->id);
+	if (index < 0)
+		return 0;
+
+	if (data->mi2s_clk_count[index]++ == 0) {
+		ret = snd_soc_dai_set_sysclk(cpu_dai,
+					     apq8096_mi2s_bclk_ids[index],
+					     MI2S_BCLK_RATE,
+					     SNDRV_PCM_STREAM_PLAYBACK);
+		if (ret) {
+			dev_err(rtd->dev, "failed to enable MI2S bit clock: %d\n",
+				ret);
+			data->mi2s_clk_count[index]--;
+			return ret;
+		}
+	}
+
+	/* The DSP provides bit and frame clock, the codec is consumer */
+	snd_soc_dai_set_fmt(cpu_dai, SND_SOC_DAIFMT_BP_FP);
+	for_each_rtd_codec_dais(rtd, i, codec_dai)
+		snd_soc_dai_set_fmt(codec_dai, SND_SOC_DAIFMT_BC_FC |
+				    SND_SOC_DAIFMT_NB_NF | SND_SOC_DAIFMT_I2S);
+
+	return 0;
+}
+
+static void apq8096_snd_shutdown(struct snd_pcm_substream *substream)
+{
+	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
+	struct apq8096_snd_data *data = snd_soc_card_get_drvdata(rtd->card);
+	struct snd_soc_dai *cpu_dai = snd_soc_rtd_to_cpu(rtd, 0);
+	int index;
+
+	index = apq8096_mi2s_index(cpu_dai->id);
+	if (index < 0)
+		return;
+
+	if (--data->mi2s_clk_count[index] == 0)
+		snd_soc_dai_set_sysclk(cpu_dai, apq8096_mi2s_bclk_ids[index],
+				       0, SNDRV_PCM_STREAM_PLAYBACK);
+}
+
 static const struct snd_soc_ops apq8096_ops = {
+	.startup = apq8096_snd_startup,
+	.shutdown = apq8096_snd_shutdown,
 	.hw_params = msm_snd_hw_params,
 };
 
@@ -104,6 +191,7 @@ static void apq8096_add_be_ops(struct snd_soc_card *card)
 
 static int apq8096_platform_probe(struct platform_device *pdev)
 {
+	struct apq8096_snd_data *data;
 	struct snd_soc_card *card;
 	struct device *dev = &pdev->dev;
 	int ret;
@@ -112,10 +200,15 @@ static int apq8096_platform_probe(struct platform_device *pdev)
 	if (!card)
 		return -ENOMEM;
 
+	data = devm_kzalloc(dev, sizeof(*data), GFP_KERNEL);
+	if (!data)
+		return -ENOMEM;
+
 	card->driver_name = "apq8096";
 	card->dev = dev;
 	card->owner = THIS_MODULE;
 	dev_set_drvdata(dev, card);
+	snd_soc_card_set_drvdata(card, data);
 	ret = qcom_snd_parse_of(card);
 	if (ret)
 		return ret;
