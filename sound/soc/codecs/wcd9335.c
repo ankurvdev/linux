@@ -2496,6 +2496,14 @@ static const struct snd_soc_dapm_route wcd9335_audio_map[] = {
 	{"ADC4", NULL, "AMIC4"},
 	{"ADC5", NULL, "AMIC5"},
 	{"ADC6", NULL, "AMIC6"},
+
+	/* DMIC Connections */
+	{"DMIC0", NULL, "DMIC0 Pin"},
+	{"DMIC1", NULL, "DMIC1 Pin"},
+	{"DMIC2", NULL, "DMIC2 Pin"},
+	{"DMIC3", NULL, "DMIC3 Pin"},
+	{"DMIC4", NULL, "DMIC4 Pin"},
+	{"DMIC5", NULL, "DMIC5 Pin"},
 };
 
 static int wcd9335_micbias_control(struct snd_soc_component *component,
@@ -4546,6 +4554,12 @@ static const struct snd_soc_dapm_widget wcd9335_dapm_widgets[] = {
 	SND_SOC_DAPM_INPUT("AMIC4"),
 	SND_SOC_DAPM_INPUT("AMIC5"),
 	SND_SOC_DAPM_INPUT("AMIC6"),
+	SND_SOC_DAPM_INPUT("DMIC0 Pin"),
+	SND_SOC_DAPM_INPUT("DMIC1 Pin"),
+	SND_SOC_DAPM_INPUT("DMIC2 Pin"),
+	SND_SOC_DAPM_INPUT("DMIC3 Pin"),
+	SND_SOC_DAPM_INPUT("DMIC4 Pin"),
+	SND_SOC_DAPM_INPUT("DMIC5 Pin"),
 
 	SND_SOC_DAPM_AIF_OUT_E("AIF1 CAP", "AIF1 Capture", 0, SND_SOC_NOPM,
 		AIF1_CAP, 0, wcd9335_codec_enable_slim,
