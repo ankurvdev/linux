@@ -1181,6 +1181,19 @@ config CHARGER_QCOM_SMB2
 	  adds support for the SMB2 switch mode battery charger found
 	  in PMI8998 and related PMICs.
 
+config BATTERY_PMI8998_FG
+	tristate "Qualcomm PMI8998 PMIC fuel gauge driver"
+	depends on MFD_SPMI_PMIC
+	help
+	  Say Y here to enable the driver for the fuel gauge (FG Gen3) of
+	  the Qualcomm PMI8998 PMIC. It reports the battery state of
+	  charge, voltage, current and temperature measured by the fuel
+	  gauge. The driver only reads fuel gauge registers; it does not
+	  configure the fuel gauge or access its SRAM.
+
+	  To compile this driver as a module, choose M here: the module
+	  will be called pmi8998_fg.
+
 config FUEL_GAUGE_MM8013
 	tristate "Mitsumi MM8013 fuel gauge driver"
 	depends on I2C
