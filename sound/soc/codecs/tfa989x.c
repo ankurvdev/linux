@@ -48,6 +48,7 @@
 #define TFA989X_CURRENTSENSE4		0x49
 
 #define TFA9890_REVISION		0x80
+#define TFA9891_REVISION		0x92
 #define TFA9895_REVISION		0x12
 #define TFA9897_REVISION		0x97
 
@@ -214,6 +215,27 @@ static int tfa9890_init(struct regmap *regmap)
 static const struct tfa989x_rev tfa9890_rev = {
 	.rev	= TFA9890_REVISION,
 	.init	= tfa9890_init,
+};
+
+static const struct reg_sequence tfa9891_reg_init[] = {
+	/* Same values as the NXP tfa98xx driver (generated code version 18.0) */
+	{ TFA989X_SYS_CTRL, 0x025d },
+	{ 0x10, 0x0018 },	/* PDM_CTRL: I2S input, PDM outputs off */
+	{ 0x22, 0x0003 },	/* CTRL_SAAM_PGA */
+	{ 0x25, 0x0001 },	/* MISC_CTRL */
+	{ TFA989X_CURRENTSENSE1, 0x0000 },
+	{ 0x55, 0x3ffb },
+};
+
+static int tfa9891_init(struct regmap *regmap)
+{
+	return regmap_multi_reg_write(regmap, tfa9891_reg_init,
+				      ARRAY_SIZE(tfa9891_reg_init));
+}
+
+static const struct tfa989x_rev tfa9891_rev = {
+	.rev	= TFA9891_REVISION,
+	.init	= tfa9891_init,
 };
 
 static const struct reg_sequence tfa9895_reg_init[] = {
@@ -405,6 +427,7 @@ static int tfa989x_i2c_probe(struct i2c_client *i2c)
 
 static const struct of_device_id tfa989x_of_match[] = {
 	{ .compatible = "nxp,tfa9890", .data = &tfa9890_rev },
+	{ .compatible = "nxp,tfa9891", .data = &tfa9891_rev },
 	{ .compatible = "nxp,tfa9895", .data = &tfa9895_rev },
 	{ .compatible = "nxp,tfa9897", .data = &tfa9897_rev },
 	{ }
