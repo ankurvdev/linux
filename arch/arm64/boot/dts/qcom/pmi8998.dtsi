@@ -39,6 +39,13 @@
 			#interrupt-cells = <2>;
 		};
 
+		pmi8998_fg: fuel-gauge@4000 {
+			compatible = "qcom,pmi8998-fg";
+			reg = <0x4000>, <0x4100>, <0x4400>;
+
+			status = "disabled";
+		};
+
 		pmi8998_rradc: adc@4500 {
 			compatible = "qcom,pmi8998-rradc";
 			reg = <0x4500>;
