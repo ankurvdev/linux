@@ -4,6 +4,7 @@
 #include <dt-bindings/sound/qcom,q6afe.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
+#include <linux/property.h>
 #include <sound/soc.h>
 #include <sound/soc-dapm.h>
 #include <sound/pcm.h>
@@ -204,7 +205,7 @@ static int apq8096_platform_probe(struct platform_device *pdev)
 	if (!data)
 		return -ENOMEM;
 
-	card->driver_name = "apq8096";
+	card->driver_name = device_get_match_data(dev);
 	card->dev = dev;
 	card->owner = THIS_MODULE;
 	dev_set_drvdata(dev, card);
@@ -218,7 +219,8 @@ static int apq8096_platform_probe(struct platform_device *pdev)
 }
 
 static const struct of_device_id msm_snd_apq8096_dt_match[] = {
-	{.compatible = "qcom,apq8096-sndcard"},
+	{ .compatible = "qcom,apq8096-sndcard", .data = "apq8096" },
+	{ .compatible = "qcom,msm8998-sndcard", .data = "msm8998" },
 	{}
 };
 
@@ -233,5 +235,5 @@ static struct platform_driver msm_snd_apq8096_driver = {
 };
 module_platform_driver(msm_snd_apq8096_driver);
 MODULE_AUTHOR("Srinivas Kandagatla <srinivas.kandagatla@linaro.org");
-MODULE_DESCRIPTION("APQ8096 ASoC Machine Driver");
+MODULE_DESCRIPTION("APQ8096/MSM8998 ASoC Machine Driver");
 MODULE_LICENSE("GPL");

@@ -157,14 +157,14 @@ config SND_SOC_QDSP6
 	 q6afe interfaces to DSP using apr.
 
 config SND_SOC_MSM8996
-	tristate "SoC Machine driver for MSM8996 and APQ8096 boards"
+	tristate "SoC Machine driver for MSM8996, APQ8096 and MSM8998 boards"
 	depends on QCOM_APR
 	depends on COMMON_CLK
 	select SND_SOC_QDSP6
 	select SND_SOC_QCOM_COMMON
 	help
 	  Support for Qualcomm Technologies LPASS audio block in
-	  APQ8096 SoC-based systems.
+	  APQ8096 and MSM8998 SoC-based systems.
 	  Say Y if you want to use audio device on this SoCs
 
 config SND_SOC_SDM845
