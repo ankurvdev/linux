@@ -1,0 +1,64 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/power/supply/qcom,pmi8998-fg.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Qualcomm PMI8998 PMIC Fuel Gauge
+
+maintainers:
+  - Casey Connolly <casey@connolly.tech>
+  - Joel Selvaraj <foss@joelselvaraj.com>
+  - Yassine Oudjana <y.oudjana@protonmail.com>
+
+description:
+  The third generation fuel gauge (FG Gen3) of the PMI8998 PMIC measures the
+  battery voltage, current and temperature and runs a state of charge
+  algorithm inside the PMIC. It is made of the FG_BATT_SOC, FG_BATT_INFO and
+  FG_MEM_IF peripherals, each with its own 0x100 byte register window.
+
+allOf:
+  - $ref: power-supply.yaml#
+
+properties:
+  compatible:
+    const: qcom,pmi8998-fg
+
+  reg:
+    items:
+      - description: FG_BATT_SOC peripheral (state of charge)
+      - description: FG_BATT_INFO peripheral (battery measurements)
+      - description: FG_MEM_IF peripheral (FG SRAM access)
+
+  monitored-battery:
+    description:
+      The simple-battery node of the battery. Its constant data
+      (charge-full-design-microamp-hours, voltage-min-design-microvolt, ...)
+      is reported for the battery; voltage-min-design-microvolt is also used
+      as the empty threshold.
+
+  power-supplies:
+    description:
+      The charger feeding the battery. The charging status is taken from it.
+
+required:
+  - compatible
+  - reg
+  - monitored-battery
+
+additionalProperties: false
+
+examples:
+  - |
+    pmic {
+      #address-cells = <1>;
+      #size-cells = <0>;
+
+      fuel-gauge@4000 {
+        compatible = "qcom,pmi8998-fg";
+        reg = <0x4000>, <0x4100>, <0x4400>;
+
+        monitored-battery = <&battery>;
+        power-supplies = <&pmi8998_charger>;
+      };
+    };
