@@ -1453,9 +1453,14 @@ static void qcom_slim_ngd_up_worker(struct work_struct *work)
 
 	ctrl = container_of(work, struct qcom_slim_ngd_ctrl, ngd_up_work);
 
-	/* Make sure qmi service is up before continuing */
+	/*
+	 * Make sure qmi service is up before continuing. The ADSP can announce
+	 * its SLIMbus QMI service well after the audio PD comes up (over a
+	 * second on MSM8998); giving up then leaves the controller without its
+	 * power-up request, so the bus enumerates but cannot stream data.
+	 */
 	if (!wait_for_completion_interruptible_timeout(&ctrl->qmi_up,
-						       msecs_to_jiffies(MSEC_PER_SEC))) {
+						       msecs_to_jiffies(10 * MSEC_PER_SEC))) {
 		dev_err(ctrl->dev, "QMI wait timeout\n");
 		return;
 	}
