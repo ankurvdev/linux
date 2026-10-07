@@ -5110,6 +5110,11 @@ static int wcd9335_slim_probe(struct slim_device *slim)
 	return 0;
 }
 
+static void wcd9335_regmap_exit(void *data)
+{
+	regmap_exit(data);
+}
+
 static int wcd9335_slim_status(struct slim_device *sdev,
 			       enum slim_device_status status)
 {
@@ -5117,6 +5122,10 @@ static int wcd9335_slim_status(struct slim_device *sdev,
 	struct device_node *ifc_dev_np;
 	struct wcd9335_codec *wcd;
 	int ret;
+
+	/* Set up the codec when it appears on the bus, ignore it going away */
+	if (status != SLIM_DEVICE_STATUS_UP)
+		return 0;
 
 	wcd = dev_get_drvdata(dev);
 
@@ -5136,16 +5145,25 @@ static int wcd9335_slim_status(struct slim_device *sdev,
 
 	slim_get_logical_addr(wcd->slim_ifc_dev);
 
-	wcd->regmap = regmap_init_slimbus(sdev, &wcd9335_regmap_config);
+	wcd->regmap = devm_regmap_init_slimbus(sdev, &wcd9335_regmap_config);
 	if (IS_ERR(wcd->regmap))
 		return dev_err_probe(dev, PTR_ERR(wcd->regmap),
 				     "Failed to allocate slim register map\n");
 
+	/*
+	 * The interface device has no driver of its own: tie its register map
+	 * to the codec so that it goes away when the codec is unbound.
+	 */
 	wcd->if_regmap = regmap_init_slimbus(wcd->slim_ifc_dev,
 						  &wcd9335_ifc_regmap_config);
 	if (IS_ERR(wcd->if_regmap))
 		return dev_err_probe(dev, PTR_ERR(wcd->if_regmap),
 				     "Failed to allocate ifc register map\n");
+
+	ret = devm_add_action_or_reset(dev, wcd9335_regmap_exit,
+				       wcd->if_regmap);
+	if (ret)
+		return ret;
 
 	ret = wcd9335_bring_up(wcd);
 	if (ret) {
