@@ -26,6 +26,7 @@
 #define TFA989X_I2SREG_I2SSR		12	/* sample rate */
 #define TFA989X_I2SREG_I2SSR_MSK	GENMASK(15, 12)
 #define TFA989X_BAT_PROT		0x05
+#define TFA989X_BAT_PROT_BSSBY		15	/* bypass battery protection clipper */
 #define TFA989X_AUDIO_CTR		0x06
 #define TFA989X_DCDCBOOST		0x07
 #define TFA989X_SPKR_CALIBRATION	0x08
@@ -229,8 +230,21 @@ static const struct reg_sequence tfa9891_reg_init[] = {
 
 static int tfa9891_init(struct regmap *regmap)
 {
-	return regmap_multi_reg_write(regmap, tfa9891_reg_init,
-				      ARRAY_SIZE(tfa9891_reg_init));
+	int ret;
+
+	ret = regmap_multi_reg_write(regmap, tfa9891_reg_init,
+				     ARRAY_SIZE(tfa9891_reg_init));
+	if (ret)
+		return ret;
+
+	/*
+	 * The battery protection clipper is normally reset and managed by the
+	 * CoolFlux DSP. With the DSP bypassed, bypass the clipper as well, like
+	 * the "bypass" profile of NXP's TFA9891 container does (CHSA = 0,
+	 * BSSBY = 1).
+	 */
+	return regmap_set_bits(regmap, TFA989X_BAT_PROT,
+			       BIT(TFA989X_BAT_PROT_BSSBY));
 }
 
 static const struct tfa989x_rev tfa9891_rev = {
