@@ -41,6 +41,25 @@ static int apq8096_mi2s_index(unsigned int dai_id)
 	}
 }
 
+/*
+ * A SLIMbus back end carries one channel per codec port that is routed to the
+ * codec DAI (e.g. only SLIM RX0 for the earpiece). The CPU DAI is configured
+ * with exactly these ports in msm_snd_hw_params(), so use their number as the
+ * channel count. Back ends without a codec channel map (MI2S, HDMI) use 2.
+ */
+static unsigned int apq8096_be_channels(struct snd_soc_pcm_runtime *rtd)
+{
+	struct snd_soc_dai *codec_dai = snd_soc_rtd_to_codec(rtd, 0);
+	unsigned int rx_ch[SLIM_MAX_RX_PORTS], tx_ch[SLIM_MAX_TX_PORTS];
+	unsigned int rx_ch_cnt = 0, tx_ch_cnt = 0;
+
+	if (snd_soc_dai_get_channel_map(codec_dai, &tx_ch_cnt, tx_ch,
+					&rx_ch_cnt, rx_ch))
+		return 2;
+
+	return max(rx_ch_cnt, tx_ch_cnt) ?: 2;
+}
+
 static int apq8096_be_hw_params_fixup(struct snd_soc_pcm_runtime *rtd,
 				      struct snd_pcm_hw_params *params)
 {
@@ -51,7 +70,7 @@ static int apq8096_be_hw_params_fixup(struct snd_soc_pcm_runtime *rtd,
 	struct snd_mask *fmt = hw_param_mask(params, SNDRV_PCM_HW_PARAM_FORMAT);
 
 	rate->min = rate->max = 48000;
-	channels->min = channels->max = 2;
+	channels->min = channels->max = apq8096_be_channels(rtd);
 
 	/* The MI2S bit clock is set up for 16-bit samples */
 	if (apq8096_mi2s_index(snd_soc_rtd_to_cpu(rtd, 0)->id) >= 0) {
