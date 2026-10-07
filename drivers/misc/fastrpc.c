@@ -318,6 +318,13 @@ struct fastrpc_channel_ctx {
 	struct fastrpc_device *secure_fdevice;
 	struct fastrpc_device *fdevice;
 	struct fastrpc_buf *remote_heap;
+	/*
+	 * Reserved memory shared with a DSP that has no SMMU stream for its
+	 * sessions (sid 0). Such a DSP gets physical addresses and can only
+	 * reach this region (assigned to it through qcom,vmids).
+	 */
+	dma_addr_t shared_mem_start;
+	size_t shared_mem_size;
 	struct list_head invoke_interrupted_mmaps;
 	bool secure;
 	bool unsigned_support;
@@ -506,11 +513,49 @@ static int __fastrpc_buf_alloc(struct fastrpc_user *fl, struct device *dev,
 	return 0;
 }
 
+static int fastrpc_remote_heap_alloc(struct fastrpc_user *fl, struct device *dev,
+				     u64 size, struct fastrpc_buf **obuf)
+{
+	struct fastrpc_channel_ctx *cctx = fl->cctx;
+	struct device *rdev = &cctx->rpdev->dev;
+	struct fastrpc_buf *buf;
+	int ret;
+
+	ret = __fastrpc_buf_alloc(fl, rdev, size, obuf);
+	if (ret || !cctx->shared_mem_size)
+		return ret;
+
+	/*
+	 * The DMA API falls back to pages outside the reserved pool when the
+	 * pool is exhausted. The DSP cannot access those, so fail instead.
+	 */
+	buf = *obuf;
+	if (buf->dma_addr < cctx->shared_mem_start ||
+	    buf->dma_addr + buf->size > cctx->shared_mem_start + cctx->shared_mem_size) {
+		dev_err(rdev, "buffer of 0x%llx bytes outside the DSP shared memory\n",
+			buf->size);
+		fastrpc_buf_free(buf);
+		*obuf = NULL;
+		return -ENOMEM;
+	}
+
+	return 0;
+}
+
 static int fastrpc_buf_alloc(struct fastrpc_user *fl, struct device *dev,
 			     u64 size, struct fastrpc_buf **obuf)
 {
 	int ret;
 	struct fastrpc_buf *buf;
+
+	/*
+	 * A session without an SMMU stream (sid 0) passes physical addresses
+	 * to the DSP, which can only access the memory shared with it. Take
+	 * every buffer the DSP sees (invoke buffers, init memory, heap pages,
+	 * exported DMA buffers) from that region.
+	 */
+	if (fl->sctx && !fl->sctx->sid)
+		return fastrpc_remote_heap_alloc(fl, dev, size, obuf);
 
 	ret = __fastrpc_buf_alloc(fl, dev, size, obuf);
 	if (ret)
@@ -522,14 +567,6 @@ static int fastrpc_buf_alloc(struct fastrpc_user *fl, struct device *dev,
 		buf->dma_addr += fastrpc_sid_offset(fl->cctx, fl->sctx);
 
 	return 0;
-}
-
-static int fastrpc_remote_heap_alloc(struct fastrpc_user *fl, struct device *dev,
-				     u64 size, struct fastrpc_buf **obuf)
-{
-	struct device *rdev = &fl->cctx->rpdev->dev;
-
-	return  __fastrpc_buf_alloc(fl, rdev, size, obuf);
 }
 
 static void fastrpc_channel_ctx_free(struct kref *ref)
@@ -878,6 +915,37 @@ static dma_addr_t fastrpc_compute_dma_addr(struct fastrpc_user *fl, dma_addr_t s
 	return sg_dma_addr + fastrpc_sid_offset(fl->cctx, fl->sctx);
 }
 
+/*
+ * Without an SMMU stream the DSP gets only the first DMA address of a buffer,
+ * so the buffer must be physically contiguous. It must also lie in the region
+ * shared with the DSP, unless the driver assigns it to the DSP itself
+ * (FASTRPC_ATTR_SECUREMAP). Anything else would make the DSP access memory it
+ * has no permission for, or memory that does not belong to the buffer.
+ */
+static bool fastrpc_dsp_can_access(struct fastrpc_channel_ctx *cctx,
+				   struct sg_table *table, u32 attr)
+{
+	struct scatterlist *sg;
+	dma_addr_t start, end = 0;
+	int i;
+
+	if (!table->nents)
+		return false;
+
+	start = sg_dma_address(table->sgl);
+	for_each_sgtable_dma_sg(table, sg, i) {
+		if (i && sg_dma_address(sg) != end)
+			return false;
+		end = sg_dma_address(sg) + sg_dma_len(sg);
+	}
+
+	if (attr & FASTRPC_ATTR_SECUREMAP)
+		return true;
+
+	return cctx->shared_mem_size && start >= cctx->shared_mem_start &&
+	       end <= cctx->shared_mem_start + cctx->shared_mem_size;
+}
+
 static int fastrpc_map_attach(struct fastrpc_user *fl, int fd,
 			      u64 len, u32 attr, struct fastrpc_map **ppmap)
 {
@@ -912,6 +980,16 @@ static int fastrpc_map_attach(struct fastrpc_user *fl, int fd,
 	table = dma_buf_map_attachment_unlocked(map->attach, DMA_BIDIRECTIONAL);
 	if (IS_ERR(table)) {
 		err = PTR_ERR(table);
+		goto map_err;
+	}
+
+	if (!sess->sid && !fastrpc_dsp_can_access(fl->cctx, table, attr)) {
+		dev_err(sess->dev,
+			"dma-buf fd %d is not contiguous memory shared with the DSP\n",
+			fd);
+		dma_buf_unmap_attachment_unlocked(map->attach, table,
+						  DMA_BIDIRECTIONAL);
+		err = -EINVAL;
 		goto map_err;
 	}
 	map->table = table;
@@ -1099,10 +1177,7 @@ static int fastrpc_get_args(u32 kernel, struct fastrpc_invoke_ctx *ctx)
 
 	ctx->msg_sz = pkt_size;
 
-	if (ctx->fl->sctx->sid)
-		err = fastrpc_buf_alloc(ctx->fl, dev, pkt_size, &ctx->buf);
-	else
-		err = fastrpc_remote_heap_alloc(ctx->fl, dev, pkt_size, &ctx->buf);
+	err = fastrpc_buf_alloc(ctx->fl, dev, pkt_size, &ctx->buf);
 	if (err)
 		return err;
 
@@ -1628,8 +1703,7 @@ static int fastrpc_init_create_process(struct fastrpc_user *fl,
 
 	memlen = ALIGN(max(INIT_FILELEN_MAX, (int)init.filelen * 4),
 		       1024 * 1024);
-	err = fastrpc_buf_alloc(fl, fl->sctx->dev, memlen,
-				&imem);
+	err = fastrpc_buf_alloc(fl, fl->sctx->dev, memlen, &imem);
 	if (err)
 		goto err_alloc;
 
@@ -2592,6 +2666,10 @@ static int fastrpc_rpmsg_probe(struct rpmsg_device *rpdev)
 				    data->vmperms, data->vmcount);
 			if (err)
 				goto err_free_data;
+
+			/* No SMMU in between: DMA addresses are physical */
+			data->shared_mem_start = res.start;
+			data->shared_mem_size = resource_size(&res);
 		}
 
 	}
@@ -2696,6 +2774,31 @@ static void fastrpc_rpmsg_remove(struct rpmsg_device *rpdev)
 
 	if (cctx->remote_heap)
 		fastrpc_buf_free(cctx->remote_heap);
+
+	/*
+	 * Give the shared region back to HLOS alone, so that the probe after a
+	 * DSP restart can assign it again (the assignment expects HLOS as the
+	 * only current owner).
+	 */
+	if (cctx->shared_mem_size) {
+		struct qcom_scm_vmperm perm = {
+			.vmid = QCOM_SCM_VMID_HLOS,
+			.perm = QCOM_SCM_PERM_RWX,
+		};
+		u64 src_perms = 0;
+		int i, err;
+
+		for (i = 0; i < cctx->vmcount; i++)
+			src_perms |= BIT(cctx->vmperms[i].vmid);
+
+		err = qcom_scm_assign_mem(cctx->shared_mem_start,
+					  cctx->shared_mem_size, &src_perms,
+					  &perm, 1);
+		if (err)
+			dev_err(&rpdev->dev,
+				"failed to reclaim the DSP shared memory: %d\n",
+				err);
+	}
 
 	of_platform_depopulate(&rpdev->dev);
 
