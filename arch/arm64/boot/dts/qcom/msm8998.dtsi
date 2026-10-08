@@ -320,6 +320,16 @@
 		};
 	};
 
+	/*
+	 * Only for boards that pin VDD_GFX at or above the 414 MHz corner
+	 * voltage; with GFX CPR the mem-acc setting follows the corner.
+	 */
+	gfx_mem_acc: gfx-mem-acc {
+		compatible = "qcom,msm8998-gfx-mem-acc";
+		qcom,tcsr = <&tcsr_regs_2 0xf004>;
+		status = "disabled";
+	};
+
 	dsi_opp_table: opp-table-dsi {
 		compatible = "operating-points-v2";
 
