@@ -3,6 +3,21 @@
  * Novatek NT35597 1440x2560 DSC command mode panel of the Essential PH-1.
  * Init sequence and timings from the downstream
  * qcom,mdss_dsi_nt35597_dsc_wqxga_cmd_mata panel node.
+ *
+ * The DDIC drives 1440 columns, but the glass shows only columns 64..1375
+ * (1312 pixels; downstream hid the edges in userspace). The layout parameter
+ * selects how that is presented (boot time, for testing):
+ *
+ *  full:   1440x2560 mode, DSC with 2 x 720 px slices (the downstream setup).
+ *  center: <width>x2560 mode. The link still carries 1440 px lines (2 x 720
+ *          px slices, same stream as "full"); the DSI host widens the mode to
+ *          the DSC slice grid and the DPU centers the planes in it.
+ *  window: <width>x2560 mode. The DDIC's column window (set_column_address)
+ *          is set to the middle <width> columns and DSC carries <slices>
+ *          slices of <width>/<slices> px. Works only if the DDIC accepts a
+ *          DSC picture narrower than 1440 written into a column window.
+ *
+ * Example: panel_essential_nt35597.layout=window on the kernel command line.
  */
 
 #include <linux/debugfs.h>
@@ -25,6 +40,39 @@
 
 #include <video/mipi_display.h>
 
+#define NT35597_WIDTH		1440	/* DDIC columns */
+#define NT35597_HEIGHT		2560
+#define NT35597_WIDTH_MM	66	/* downstream, for 1440 columns */
+#define NT35597_HEIGHT_MM	129
+
+enum essential_nt35597_layout {
+	LAYOUT_FULL,
+	LAYOUT_CENTER,
+	LAYOUT_WINDOW,
+};
+
+static const char * const essential_nt35597_layout_names[] = {
+	[LAYOUT_FULL] = "full",
+	[LAYOUT_CENTER] = "center",
+	[LAYOUT_WINDOW] = "window",
+};
+
+static char *param_layout = "center";
+module_param_named(layout, param_layout, charp, 0444);
+MODULE_PARM_DESC(layout, "full, center (default) or window; see the driver source");
+
+static int param_width = 1312;
+module_param_named(width, param_width, int, 0444);
+MODULE_PARM_DESC(width, "Visible width for center/window, even (default 1312)");
+
+static int param_slices = 2;
+module_param_named(slices, param_slices, int, 0444);
+MODULE_PARM_DESC(slices, "DSC slices per line for window, even (default 2)");
+
+static int param_slice_height = 32;
+module_param_named(slice_height, param_slice_height, int, 0444);
+MODULE_PARM_DESC(slice_height, "DSC slice height, divides 2560 (default 32)");
+
 static const char * const essential_nt35597_supply_names[] = {
 	"vddio",	/* pm8998 l14 */
 	"avdd",		/* pmi8998 LAB */
@@ -37,6 +85,10 @@ struct essential_nt35597 {
 	struct drm_dsc_config dsc;
 	struct gpio_desc *reset_gpio;
 	struct regulator_bulk_data supplies[ARRAY_SIZE(essential_nt35597_supply_names)];
+
+	enum essential_nt35597_layout layout;
+	struct drm_display_mode mode;
+	u16 col_start, col_end;		/* DDIC column window (layout window) */
 
 	/* debugfs: last DCS read and whether debug transfers use LP mode */
 	struct mutex dbg_lock;
@@ -149,6 +201,14 @@ static int essential_nt35597_on(struct essential_nt35597 *ctx)
 	drm_dsc_pps_payload_pack(&pps, &ctx->dsc);
 	mipi_dsi_picture_parameter_set_multi(&dsi_ctx, &pps);
 
+	/* Frames (narrower than the DDIC) go to the visible columns only */
+	if (ctx->layout == LAYOUT_WINDOW) {
+		mipi_dsi_dcs_set_column_address_multi(&dsi_ctx, ctx->col_start,
+						      ctx->col_end);
+		mipi_dsi_dcs_set_page_address_multi(&dsi_ctx, 0,
+						    NT35597_HEIGHT - 1);
+	}
+
 	if (!dsi_ctx.accum_err) {
 		u8 mode = 0;
 		ssize_t ret;
@@ -196,6 +256,12 @@ static int essential_nt35597_prepare(struct drm_panel *panel)
 	}
 	msleep(10);
 
+	/* The DSI host has computed the DSC parameters for the link mode */
+	if (ctx->dsc.pic_width != ctx->dsc.slice_width * ctx->dsc.slice_count)
+		dev_warn(panel->dev, "DSC picture width %u, expected %u\n",
+			 ctx->dsc.pic_width,
+			 ctx->dsc.slice_width * ctx->dsc.slice_count);
+
 	essential_nt35597_reset(ctx);
 
 	ret = essential_nt35597_on(ctx);
@@ -223,25 +289,12 @@ static int essential_nt35597_unprepare(struct drm_panel *panel)
 	return 0;
 }
 
-static const struct drm_display_mode essential_nt35597_mode = {
-	.clock = (1440 + 104 + 12 + 36) * (2560 + 156 + 1 + 155) * 60 / 1000,
-	.hdisplay = 1440,
-	.hsync_start = 1440 + 104,
-	.hsync_end = 1440 + 104 + 12,
-	.htotal = 1440 + 104 + 12 + 36,
-	.vdisplay = 2560,
-	.vsync_start = 2560 + 156,
-	.vsync_end = 2560 + 156 + 1,
-	.vtotal = 2560 + 156 + 1 + 155,
-	.width_mm = 66,
-	.height_mm = 129,
-	.type = DRM_MODE_TYPE_DRIVER,
-};
-
 static int essential_nt35597_get_modes(struct drm_panel *panel,
 				       struct drm_connector *connector)
 {
-	return drm_connector_helper_get_modes_fixed(connector, &essential_nt35597_mode);
+	struct essential_nt35597 *ctx = to_essential_nt35597(panel);
+
+	return drm_connector_helper_get_modes_fixed(connector, &ctx->mode);
 }
 
 /* Parse up to @max whitespace-separated hex bytes */
@@ -393,6 +446,84 @@ static const struct drm_panel_funcs essential_nt35597_panel_funcs = {
 	.debugfs_init = essential_nt35597_debugfs_init,
 };
 
+/* Pick the layout from the module parameters; fall back to full if invalid */
+static void essential_nt35597_setup_layout(struct essential_nt35597 *ctx)
+{
+	struct device *dev = &ctx->dsi->dev;
+	struct drm_display_mode *mode = &ctx->mode;
+	int layout, width = NT35597_WIDTH, slices = 2;
+	int slice_height = param_slice_height;
+	bool valid = true;
+
+	layout = sysfs_match_string(essential_nt35597_layout_names, param_layout);
+	if (layout < 0) {
+		valid = false;
+	} else if (layout != LAYOUT_FULL) {
+		width = param_width;
+		if (width < 64 || width > NT35597_WIDTH || width % 2)
+			valid = false;
+	}
+
+	if (valid && layout == LAYOUT_WINDOW) {
+		/* each of the two DSC encoders takes half of the slices */
+		slices = param_slices;
+		if (slices < 2 || slices % 2 || width % slices)
+			valid = false;
+	}
+
+	if (slice_height < 1 || NT35597_HEIGHT % slice_height)
+		valid = false;
+
+	if (!valid) {
+		dev_warn(dev, "invalid layout=%s width=%d slices=%d slice_height=%d, using full\n",
+			 param_layout, param_width, param_slices, param_slice_height);
+		layout = LAYOUT_FULL;
+		width = NT35597_WIDTH;
+		slices = 2;
+		slice_height = 32;
+	}
+
+	ctx->layout = layout;
+	ctx->col_start = (NT35597_WIDTH - width) / 2;
+	ctx->col_end = ctx->col_start + width - 1;
+
+	/* downstream config2: two DSC encoders merged onto one DSI link */
+	ctx->dsc.dsc_version_major = 1;
+	ctx->dsc.dsc_version_minor = 1;
+	ctx->dsc.slice_height = slice_height;
+	if (layout == LAYOUT_WINDOW) {
+		ctx->dsc.slice_count = slices;
+		ctx->dsc.slice_width = width / slices;
+	} else {
+		/* for center wider than the mode: the DSI host centers the mode */
+		ctx->dsc.slice_count = 2;
+		ctx->dsc.slice_width = NT35597_WIDTH / 2;
+	}
+	ctx->dsc.bits_per_component = 8;
+	ctx->dsc.bits_per_pixel = 8 << 4; /* 4 fractional bits */
+	ctx->dsc.block_pred_enable = true;
+
+	/* Downstream porches; command mode, so they only set the clock */
+	mode->hdisplay = width;
+	mode->hsync_start = mode->hdisplay + 104;
+	mode->hsync_end = mode->hsync_start + 12;
+	mode->htotal = mode->hsync_end + 36;
+	mode->vdisplay = NT35597_HEIGHT;
+	mode->vsync_start = mode->vdisplay + 156;
+	mode->vsync_end = mode->vsync_start + 1;
+	mode->vtotal = mode->vsync_end + 155;
+	mode->clock = mode->htotal * mode->vtotal * 60 / 1000;
+	mode->width_mm = DIV_ROUND_CLOSEST(NT35597_WIDTH_MM * width, NT35597_WIDTH);
+	mode->height_mm = NT35597_HEIGHT_MM;
+	mode->type = DRM_MODE_TYPE_DRIVER;
+
+	dev_info(dev, "layout %s: %dx%d mode, DSC %u x %ux%u slices, DDIC columns %u..%u\n",
+		 essential_nt35597_layout_names[layout], width, NT35597_HEIGHT,
+		 ctx->dsc.slice_count, ctx->dsc.slice_width, ctx->dsc.slice_height,
+		 layout == LAYOUT_WINDOW ? ctx->col_start : 0,
+		 layout == LAYOUT_WINDOW ? ctx->col_end : NT35597_WIDTH - 1);
+}
+
 static int essential_nt35597_probe(struct mipi_dsi_device *dsi)
 {
 	struct device *dev = &dsi->dev;
@@ -427,6 +558,8 @@ static int essential_nt35597_probe(struct mipi_dsi_device *dsi)
 	ctx->dsi = dsi;
 	mipi_dsi_set_drvdata(dsi, ctx);
 
+	essential_nt35597_setup_layout(ctx);
+
 	dsi->lanes = 4;
 	dsi->format = MIPI_DSI_FMT_RGB888;
 	dsi->mode_flags = MIPI_DSI_MODE_LPM | MIPI_DSI_CLOCK_NON_CONTINUOUS |
@@ -439,16 +572,6 @@ static int essential_nt35597_probe(struct mipi_dsi_device *dsi)
 		return dev_err_probe(dev, ret, "Failed to get backlight\n");
 
 	drm_panel_add(&ctx->panel);
-
-	/* downstream config2: two DSC encoders merged onto one DSI link */
-	ctx->dsc.dsc_version_major = 1;
-	ctx->dsc.dsc_version_minor = 1;
-	ctx->dsc.slice_height = 32;
-	ctx->dsc.slice_width = 720;
-	ctx->dsc.slice_count = 1440 / ctx->dsc.slice_width;
-	ctx->dsc.bits_per_component = 8;
-	ctx->dsc.bits_per_pixel = 8 << 4; /* 4 fractional bits */
-	ctx->dsc.block_pred_enable = true;
 
 	dsi->dsc = &ctx->dsc;
 
