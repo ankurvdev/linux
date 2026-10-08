@@ -604,6 +604,7 @@ static void _dpu_crtc_complete_flip(struct drm_crtc *crtc)
 		drm_crtc_send_vblank_event(crtc, dpu_crtc->event);
 		dpu_crtc->event = NULL;
 	}
+	dpu_crtc->flip_on_te = false;
 	spin_unlock_irqrestore(&dev->event_lock, flags);
 }
 
@@ -651,6 +652,9 @@ void dpu_crtc_vblank_callback(struct drm_crtc *crtc)
 
 	drm_crtc_handle_vblank(crtc);
 	trace_dpu_crtc_vblank_cb(DRMID(crtc));
+
+	if (READ_ONCE(dpu_crtc->flip_on_te))
+		_dpu_crtc_complete_flip(crtc);
 }
 
 static void dpu_crtc_frame_event_work(struct kthread_work *work)
@@ -1086,6 +1090,8 @@ void dpu_crtc_commit_kickoff(struct drm_crtc *crtc)
 	struct dpu_crtc *dpu_crtc = to_dpu_crtc(crtc);
 	struct dpu_kms *dpu_kms = _dpu_crtc_get_kms(crtc);
 	struct dpu_crtc_state *cstate = to_dpu_crtc_state(crtc->state);
+	bool cmd_mode = true;
+	unsigned long flags;
 
 	/*
 	 * If no mixers has been allocated in dpu_crtc_atomic_check(),
@@ -1123,6 +1129,21 @@ void dpu_crtc_commit_kickoff(struct drm_crtc *crtc)
 				crtc->state->encoder_mask) {
 			dpu_encoder_kickoff(encoder);
 			dpu_encoder_start_frame_done_timer(encoder);
+			cmd_mode &= dpu_encoder_get_intf_mode(encoder) == INTF_MODE_CMD;
+		}
+
+		/*
+		 * A command mode panel shows the new frame from the TE at which
+		 * its transfer starts, and the previous framebuffer is idle by
+		 * then. Complete the flip at that TE rather than at pp_done,
+		 * most of a frame later, so that userspace gets a whole frame to
+		 * render the next one. The next commit still waits for pp_done
+		 * in msm_atomic_commit_tail().
+		 */
+		if (cmd_mode) {
+			spin_lock_irqsave(&crtc->dev->event_lock, flags);
+			dpu_crtc->flip_on_te = !!dpu_crtc->event;
+			spin_unlock_irqrestore(&crtc->dev->event_lock, flags);
 		}
 	}
 

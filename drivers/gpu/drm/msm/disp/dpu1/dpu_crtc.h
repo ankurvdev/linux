@@ -126,6 +126,8 @@ struct dpu_crtc_frame_event {
  * @name          : ASCII description of this crtc
  * @event         : Pointer to last received drm vblank event. If there is a
  *                  pending vblank event, this will be non-null.
+ * @flip_on_te    : Command mode: send @event at the next TE (vblank), where
+ *                  the transfer of the kicked off frame starts
  * @vsync_count   : Running count of received vsync events
  * @drm_requested_vblank : Whether vblanks have been enabled in the encoder
  * @property_info : Opaque structure for generic property support
@@ -158,6 +160,7 @@ struct dpu_crtc {
 	char name[DPU_CRTC_NAME_SIZE];
 
 	struct drm_pending_vblank_event *event;
+	bool flip_on_te;
 	u32 vsync_count;
 
 	u32 vblank_cb_count;
