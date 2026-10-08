@@ -47,6 +47,17 @@ config QCOM_GENI_SE
 	  driver is also used to manage the common aspects of multiple Serial
 	  Engines present in the QUP.
 
+config QCOM_GFX_MEM_ACC
+	tristate "Qualcomm MSM8998 GFX memory accelerator select"
+	depends on ARM64 || COMPILE_TEST
+	default ARCH_QCOM
+	select MFD_SYSCON
+	help
+	  Selects the GFX memory accelerator setting that the MSM8998 GPU
+	  needs at 414 MHz and above, on boards that run the graphics rail
+	  (VDD_GFX) at a fixed voltage at or above that corner instead of
+	  under GFX CPR control.
+
 config QCOM_GSBI
 	tristate "Qualcomm General Serial Bus Interface"
 	depends on ARM || COMPILE_TEST
