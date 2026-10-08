@@ -882,8 +882,18 @@ static int dpu_plane_split(struct drm_plane *plane,
 	uint32_t max_linewidth;
 	u32 num_lm;
 	int stage_id, num_stages;
+	int x_off, y_off;
 
 	max_linewidth = pdpu->catalog->caps->max_linewidth;
+
+	/*
+	 * An encoder may drive a link mode that is larger than the CRTC mode
+	 * (the DSI host does so for panels whose DSC slice grid is wider than
+	 * the visible area): center the CRTC mode in it. The uncovered
+	 * columns/lines get the mixer's border color.
+	 */
+	x_off = max(0, (mode->hdisplay - crtc_state->mode.hdisplay) / 2);
+	y_off = max(0, (mode->vdisplay - crtc_state->mode.vdisplay) / 2);
 
 	/* In non-virtual plane case, one mixer pair is always needed. */
 	num_lm = dpu_crtc_get_num_lm(crtc_state);
@@ -924,6 +934,7 @@ static int dpu_plane_split(struct drm_plane *plane,
 				new_plane_state->rotation);
 
 		pipe_cfg->dst_rect = new_plane_state->dst;
+		drm_rect_translate(&pipe_cfg->dst_rect, x_off, y_off);
 
 		DPU_DEBUG_PLANE(pdpu, "checking src " DRM_RECT_FMT
 				" vs clip window " DRM_RECT_FMT "\n",
