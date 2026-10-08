@@ -253,6 +253,8 @@ struct fastrpc_map {
 	u64 len;
 	u64 raddr;
 	u32 attr;
+	/* mapped on the DSP with INIT_MMAP (no INIT_MEM_MAP in its firmware) */
+	bool legacy_mmap;
 	struct kref refcount;
 };
 
@@ -2271,15 +2273,26 @@ static int fastrpc_req_mem_unmap_impl(struct fastrpc_user *fl, struct fastrpc_me
 		return -EINVAL;
 	}
 
-	req_msg.client_id = fl->client_id;
-	req_msg.len = map->len;
-	req_msg.vaddrin = map->raddr;
-	req_msg.fd = map->fd;
+	if (map->legacy_mmap) {
+		struct fastrpc_munmap_req_msg munmap_msg = {
+			.client_id = fl->client_id,
+			.vaddr = map->raddr,
+			.size = map->len,
+		};
 
-	args[0].ptr = (u64) (uintptr_t) &req_msg;
-	args[0].length = sizeof(req_msg);
+		args[0].ptr = (u64) (uintptr_t) &munmap_msg;
+		args[0].length = sizeof(munmap_msg);
+		sc = FASTRPC_SCALARS(FASTRPC_RMID_INIT_MUNMAP, 1, 0);
+	} else {
+		req_msg.client_id = fl->client_id;
+		req_msg.len = map->len;
+		req_msg.vaddrin = map->raddr;
+		req_msg.fd = map->fd;
 
-	sc = FASTRPC_SCALARS(FASTRPC_RMID_INIT_MEM_UNMAP, 1, 0);
+		args[0].ptr = (u64) (uintptr_t) &req_msg;
+		args[0].length = sizeof(req_msg);
+		sc = FASTRPC_SCALARS(FASTRPC_RMID_INIT_MEM_UNMAP, 1, 0);
+	}
 	err = fastrpc_internal_invoke(fl, true, FASTRPC_INIT_HANDLE, sc,
 				      &args[0]);
 	if (err) {
@@ -2299,6 +2312,48 @@ static int fastrpc_req_mem_unmap(struct fastrpc_user *fl, char __user *argp)
 		return -EFAULT;
 
 	return fastrpc_req_mem_unmap_impl(fl, &req);
+}
+
+/*
+ * Older DSP firmware, e.g. on the MSM8998 SLPI, lacks INIT_MEM_MAP and fails it.
+ * Without an SMMU stream the buffer is physically contiguous memory shared with
+ * the DSP (checked in fastrpc_map_attach()), so map it with the older INIT_MMAP
+ * instead, as the downstream driver does.
+ */
+static int fastrpc_req_mem_map_legacy(struct fastrpc_user *fl,
+				      struct fastrpc_mem_map *req,
+				      struct fastrpc_map *map,
+				      struct fastrpc_mmap_rsp_msg *rsp_msg)
+{
+	struct fastrpc_invoke_args args[3] = { [0 ... 2] = { 0 } };
+	struct fastrpc_mmap_req_msg req_msg = { 0 };
+	struct fastrpc_phy_page pages = { 0 };
+	int err;
+	u32 sc;
+
+	req_msg.client_id = fl->client_id;
+	req_msg.flags = req->flags;
+	req_msg.vaddr = req->vaddrin;
+	req_msg.num = sizeof(pages);
+
+	args[0].ptr = (u64) (uintptr_t) &req_msg;
+	args[0].length = sizeof(req_msg);
+
+	pages.addr = map->dma_addr;
+	pages.size = map->len;
+
+	args[1].ptr = (u64) (uintptr_t) &pages;
+	args[1].length = sizeof(pages);
+
+	args[2].ptr = (u64) (uintptr_t) rsp_msg;
+	args[2].length = sizeof(*rsp_msg);
+
+	sc = FASTRPC_SCALARS(FASTRPC_RMID_INIT_MMAP, 2, 1);
+	err = fastrpc_internal_invoke(fl, true, FASTRPC_INIT_HANDLE, sc, &args[0]);
+	if (!err)
+		map->legacy_mmap = true;
+
+	return err;
 }
 
 static int fastrpc_req_mem_map(struct fastrpc_user *fl, char __user *argp)
@@ -2350,6 +2405,8 @@ static int fastrpc_req_mem_map(struct fastrpc_user *fl, char __user *argp)
 
 	sc = FASTRPC_SCALARS(FASTRPC_RMID_INIT_MEM_MAP, 3, 1);
 	err = fastrpc_internal_invoke(fl, true, FASTRPC_INIT_HANDLE, sc, &args[0]);
+	if (err && !fl->sctx->sid)
+		err = fastrpc_req_mem_map_legacy(fl, &req, map, &rsp_msg);
 	if (err) {
 		dev_err(dev, "mem mmap error, fd %d, vaddr %llx, size %lld\n",
 			req.fd, req.vaddrin, map->len);
