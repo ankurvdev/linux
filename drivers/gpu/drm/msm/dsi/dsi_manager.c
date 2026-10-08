@@ -4,6 +4,8 @@
  */
 
 #include "drm/drm_bridge_connector.h"
+#include <drm/display/drm_dsc.h>
+#include <drm/drm_modes.h>
 
 #include "msm_kms.h"
 #include "dsi.h"
@@ -384,6 +386,48 @@ disable_phy:
 	dsi_mgr_phy_disable(id);
 }
 
+/*
+ * A panel may describe a DSC slice grid that is wider than its mode: the DDIC
+ * of the Essential PH-1 takes 1440 pixel lines (2 x 720 px slices) but its
+ * glass shows only the middle 1312 columns. Drive the link at the grid width
+ * and let the display controller center the mode in it (see
+ * dpu_plane_split()). Single DSI links only.
+ */
+static void dsi_mgr_widen_mode(struct msm_dsi *msm_dsi,
+			       struct drm_display_mode *mode)
+{
+	struct drm_dsc_config *dsc = msm_dsi_host_get_dsc_config(msm_dsi->host);
+	int htotal = mode->htotal;
+	int extra;
+
+	if (!dsc || IS_BONDED_DSI())
+		return;
+
+	extra = dsc->slice_width * dsc->slice_count - mode->hdisplay;
+	if (extra <= 0 || extra % 2)
+		return;
+
+	mode->hdisplay += extra;
+	mode->hsync_start += extra;
+	mode->hsync_end += extra;
+	mode->htotal += extra;
+	/* same porches and refresh rate */
+	mode->clock = DIV_ROUND_CLOSEST_ULL((u64)mode->clock * mode->htotal,
+					    htotal);
+	drm_mode_set_crtcinfo(mode, 0);
+}
+
+static bool dsi_mgr_bridge_mode_fixup(struct drm_bridge *bridge,
+				      const struct drm_display_mode *mode,
+				      struct drm_display_mode *adjusted_mode)
+{
+	int id = dsi_mgr_bridge_get_id(bridge);
+
+	dsi_mgr_widen_mode(dsi_mgr_get_dsi(id), adjusted_mode);
+
+	return true;
+}
+
 static void dsi_mgr_bridge_mode_set(struct drm_bridge *bridge,
 		const struct drm_display_mode *mode,
 		const struct drm_display_mode *adjusted_mode)
@@ -412,8 +456,14 @@ static enum drm_mode_status dsi_mgr_bridge_mode_valid(struct drm_bridge *bridge,
 	struct msm_dsi *msm_dsi = dsi_mgr_get_dsi(id);
 	struct mipi_dsi_host *host = msm_dsi->host;
 	struct platform_device *pdev = msm_dsi->pdev;
+	struct drm_display_mode link_mode = {};
 	struct dev_pm_opp *opp;
 	unsigned long byte_clk_rate;
+
+	/* check the mode the link will run, see dsi_mgr_widen_mode() */
+	drm_mode_copy(&link_mode, mode);
+	dsi_mgr_widen_mode(msm_dsi, &link_mode);
+	mode = &link_mode;
 
 	byte_clk_rate = dsi_byte_clk_get_rate(host, IS_BONDED_DSI(), mode);
 
@@ -453,6 +503,7 @@ static const struct drm_bridge_funcs dsi_mgr_bridge_funcs = {
 	.attach = dsi_mgr_bridge_attach,
 	.atomic_pre_enable = dsi_mgr_bridge_pre_enable,
 	.atomic_post_disable = dsi_mgr_bridge_post_disable,
+	.mode_fixup = dsi_mgr_bridge_mode_fixup,
 	.mode_set = dsi_mgr_bridge_mode_set,
 	.mode_valid = dsi_mgr_bridge_mode_valid,
 };
