@@ -61,13 +61,18 @@ static int ipa_open(struct net_device *netdev)
 	if (ret < 0)
 		goto err_power_put;
 
-	ret = ipa_endpoint_enable_one(priv->tx);
-	if (ret)
-		goto err_power_put;
+	/* On IPA v3.1 ipa_stop() leaves the channels running (see there) */
+	if (!test_bit(priv->tx->endpoint_id, ipa->enabled)) {
+		ret = ipa_endpoint_enable_one(priv->tx);
+		if (ret)
+			goto err_power_put;
+	}
 
-	ret = ipa_endpoint_enable_one(priv->rx);
-	if (ret)
-		goto err_disable_tx;
+	if (!test_bit(priv->rx->endpoint_id, ipa->enabled)) {
+		ret = ipa_endpoint_enable_one(priv->rx);
+		if (ret)
+			goto err_disable_tx;
+	}
 
 	netif_start_queue(netdev);
 
@@ -97,6 +102,16 @@ static int ipa_stop(struct net_device *netdev)
 		goto out_power_put;
 
 	netif_stop_queue(netdev);
+
+	/* On IPA v3.1 (GSI v1.0) stopping the modem RX channel never
+	 * completes: it stays in STOP_IN_PROC and the next open fails with
+	 * "bad state 4 before start", so the interface can't come back up
+	 * (downstream injects a DMA task to finish such stops).  Keep both
+	 * channels running while the interface is down; packets received
+	 * meanwhile are dropped by the stack.
+	 */
+	if (ipa->version == IPA_VERSION_3_1)
+		goto out_power_put;
 
 	ipa_endpoint_disable_one(priv->rx);
 	ipa_endpoint_disable_one(priv->tx);
