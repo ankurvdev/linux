@@ -30,7 +30,7 @@
 #include <linux/slab.h>
 #include <linux/soc/qcom/apr.h>
 #include <linux/wait.h>
-#include <linux/hrtimer.h>
+#include <linux/workqueue.h>
 #include <sound/soc.h>
 #include <sound/soc-dapm.h>
 #include <dt-bindings/sound/qcom,q6dsp-lpass-ports.h>
@@ -746,22 +746,30 @@ static int q6voice_pcm_new(struct snd_soc_component *component,
 }
 
 /*
- * A timer moves the PCM position along at the stream rate, so clients see a
+ * A work item moves the PCM position along at the stream rate, so clients see a
  * running stream (and keep it, and the voice path, open) for the whole call.
+ * The DPCM links are nonatomic (their stream lock is a mutex), so this must run
+ * in process context: an hrtimer callback taking that lock deadlocked against
+ * a client stopping the stream.
  */
 struct q6voice_pcm {
-	struct hrtimer timer;
+	struct delayed_work work;
 	struct snd_pcm_substream *substream;
 	snd_pcm_uframes_t pos;
-	ktime_t period;
+	unsigned long period_jiffies;
+	bool running;
 };
 
-static enum hrtimer_restart q6voice_pcm_tick(struct hrtimer *t)
+static void q6voice_pcm_tick(struct work_struct *w)
 {
-	struct q6voice_pcm *vp = container_of(t, struct q6voice_pcm, timer);
+	struct q6voice_pcm *vp = container_of(to_delayed_work(w),
+					      struct q6voice_pcm, work);
 	struct snd_pcm_substream *ss = vp->substream;
 	struct snd_pcm_runtime *rt = ss->runtime;
 	snd_pcm_sframes_t room;
+
+	if (!READ_ONCE(vp->running))
+		return;
 
 	/*
 	 * Never run past the client: an xrun stops the stream, and DPCM then
@@ -788,8 +796,9 @@ static enum hrtimer_restart q6voice_pcm_tick(struct hrtimer *t)
 	vp->pos = (vp->pos + clamp_t(snd_pcm_sframes_t, room, 0,
 				     rt->period_size)) % rt->buffer_size;
 	snd_pcm_period_elapsed(ss);
-	hrtimer_forward_now(t, vp->period);
-	return HRTIMER_RESTART;
+
+	if (READ_ONCE(vp->running))
+		schedule_delayed_work(&vp->work, vp->period_jiffies);
 }
 
 static int q6voice_pcm_trigger(struct snd_soc_component *component,
@@ -802,14 +811,17 @@ static int q6voice_pcm_trigger(struct snd_soc_component *component,
 	case SNDRV_PCM_TRIGGER_START:
 	case SNDRV_PCM_TRIGGER_RESUME:
 	case SNDRV_PCM_TRIGGER_PAUSE_RELEASE:
-		vp->period = ns_to_ktime(div_u64((u64)rt->period_size *
-						 NSEC_PER_SEC, rt->rate));
-		hrtimer_start(&vp->timer, vp->period, HRTIMER_MODE_REL_SOFT);
+		vp->period_jiffies = max(1UL, msecs_to_jiffies(
+			div_u64((u64)rt->period_size * MSEC_PER_SEC, rt->rate)));
+		WRITE_ONCE(vp->running, true);
+		schedule_delayed_work(&vp->work, vp->period_jiffies);
 		break;
 	case SNDRV_PCM_TRIGGER_STOP:
 	case SNDRV_PCM_TRIGGER_SUSPEND:
 	case SNDRV_PCM_TRIGGER_PAUSE_PUSH:
-		hrtimer_try_to_cancel(&vp->timer);
+		/* Called with the stream lock held: don't wait for the work */
+		WRITE_ONCE(vp->running, false);
+		cancel_delayed_work(&vp->work);
 		break;
 	default:
 		return -EINVAL;
@@ -830,7 +842,8 @@ static int q6voice_pcm_close(struct snd_soc_component *component,
 {
 	struct q6voice_pcm *vp = substream->runtime->private_data;
 
-	hrtimer_cancel(&vp->timer);
+	WRITE_ONCE(vp->running, false);
+	cancel_delayed_work_sync(&vp->work);
 	kfree(vp);
 	return 0;
 }
@@ -842,8 +855,7 @@ static int q6voice_pcm_open(struct snd_soc_component *component,
 
 	if (!vp)
 		return -ENOMEM;
-	hrtimer_setup(&vp->timer, q6voice_pcm_tick, CLOCK_MONOTONIC,
-		      HRTIMER_MODE_REL_SOFT);
+	INIT_DELAYED_WORK(&vp->work, q6voice_pcm_tick);
 	vp->substream = substream;
 	substream->runtime->private_data = vp;
 	substream->runtime->hw = q6voice_dai_hardware;
