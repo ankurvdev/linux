@@ -3414,6 +3414,28 @@
 							#sound-dai-cells = <0>;
 						};
 					};
+
+					q6mvm: service@9 {
+						compatible = "qcom,q6mvm";
+						reg = <APR_SVC_ADSP_MVM>;
+						#sound-dai-cells = <1>;
+						qcom,protection-domain = "avs/audio",
+									 "msm/adsp/audio_pd";
+					};
+
+					service@a {
+						compatible = "qcom,q6cvs";
+						reg = <APR_SVC_ADSP_CVS>;
+						qcom,protection-domain = "avs/audio",
+									 "msm/adsp/audio_pd";
+					};
+
+					service@b {
+						compatible = "qcom,q6cvp";
+						reg = <APR_SVC_ADSP_CVP>;
+						qcom,protection-domain = "avs/audio",
+									 "msm/adsp/audio_pd";
+					};
 				};
 			};
 		};
