@@ -53,6 +53,18 @@ static unsigned int apq8096_be_channels(struct snd_soc_pcm_runtime *rtd)
 	unsigned int rx_ch[SLIM_MAX_RX_PORTS], tx_ch[SLIM_MAX_TX_PORTS];
 	unsigned int rx_ch_cnt = 0, tx_ch_cnt = 0;
 
+	/*
+	 * Essential PH-1: QUAT MI2S feeds a single TFA9891 amplifier on the
+	 * left slot (Tx: its feedback).  Run both directions mono (they share
+	 * the interface): the ADSP voice processor only produces a
+	 * mono Rx path, and audio streams are mono for this device anyway.
+	 */
+	if ((snd_soc_rtd_to_cpu(rtd, 0)->id == QUATERNARY_MI2S_RX ||
+	     snd_soc_rtd_to_cpu(rtd, 0)->id == QUATERNARY_MI2S_TX) &&
+	    of_device_is_compatible(rtd->card->dev->of_node,
+				    "qcom,msm8998-sndcard"))
+		return 1;
+
 	if (snd_soc_dai_get_channel_map(codec_dai, &tx_ch_cnt, tx_ch,
 					&rx_ch_cnt, rx_ch))
 		return 2;
