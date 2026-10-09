@@ -88,7 +88,7 @@ int ipa_mem_setup(struct ipa *ipa)
 	/* Get a transaction to define the header memory region and to zero
 	 * the processing context and modem memory regions.
 	 */
-	trans = ipa_cmd_trans_alloc(ipa, 4);
+	trans = ipa_cmd_trans_alloc(ipa, 5);
 	if (!trans) {
 		dev_err(ipa->dev, "no transaction for memory setup\n");
 		return -EBUSY;
@@ -106,6 +106,17 @@ int ipa_mem_setup(struct ipa *ipa)
 		size += mem->size;
 
 	ipa_cmd_hdr_init_local_add(trans, offset, size, addr);
+
+	/* The default route set by ipa_endpoint_default_route_set() names the
+	 * header table in system memory, as the downstream driver does, but
+	 * unlike that driver we never locate one, so its base stays zero.  On
+	 * IPA v3.1 (msm8998) the IPA reads IOVA 0x38 as soon as the uplink
+	 * carries traffic; the SMMU fault that follows crashes the modem.
+	 * Point the system table at the zeroed DMA buffer: an empty table as
+	 * far as the hardware is concerned.
+	 */
+	if (ipa->version == IPA_VERSION_3_1)
+		ipa_cmd_hdr_init_system_add(trans, addr);
 
 	ipa_mem_zero_region_add(trans, IPA_MEM_MODEM_PROC_CTX);
 	ipa_mem_zero_region_add(trans, IPA_MEM_AP_PROC_CTX);
