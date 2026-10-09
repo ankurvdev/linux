@@ -1,27 +1,27 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * Qualcomm Core Voice Driver (CVD) client
+ * Qualcomm Core Voice Driver (CVD) client: voice call audio on the ADSP
  *
- * Mainline has no voice-call support for Qualcomm ADSPs: sound/soc/qcom/qdsp6/
- * implements the audio data path (ASM/AFE/ADM) only.  Voice calls - CS and
- * VoLTE alike - run on three further APR services on the same ADSP domain:
+ * Call audio runs between the modem and the codec without passing through
+ * Linux: the ADSP's voice services vocode it and route it to AFE ports.  This
+ * client sets that up for a modem call:
  *
  *   MVM  (0x09)  Multimode Voice Manager - owns the session, starts/stops it
  *   CVS  (0x0A)  Core Voice Stream      - vocoder encode/decode
- *   CVP  (0x0B)  Core Voice Processor   - device/topology, routes to the AFE
+ *   CVP  (0x0B)  Core Voice Processor   - voice processing on the AFE ports
  *
- * For VoLTE the modem's IMS stack terminates RTP and the ADSP vocodes, so the
- * AP never touches media; it only has to build the session and route PCM.
+ * The sessions are passive ones named after the VSID ("11C05000", VOICEMMODE1);
+ * the modem's full-control session of the same name runs the state machine.
  *
- * This client builds, starts and tears down a complete session.  Sessions are
- * named with an ASCII string rather than a numeric VSID - "11C05000" is
- * VOICEMMODE1, the multimode session stock uses for VoLTE.  There is no ALSA
- * front-end yet; the session is driven from debugfs.
+ * A CS-VOICE front-end DAI exposes it to ALSA: its "Voice Mixer" switches pick
+ * the AFE back ends, and opening its playback and capture PCMs starts them and
+ * the session.  The PCMs carry no data.
  *
  * Copyright (c) 2026 Lance <Gero3977@gmail.com>
+ * Copyright (c) 2026 Ankur Verma <ankur.verma@outlook.com>
+ * CS-VOICE front end after Stephan Gerhold's msm8916 q6voice-dai driver.
  */
 
-#include <linux/debugfs.h>
 #include <linux/jiffies.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
@@ -30,35 +30,61 @@
 #include <linux/slab.h>
 #include <linux/soc/qcom/apr.h>
 #include <linux/wait.h>
+#include <linux/hrtimer.h>
+#include <sound/soc.h>
+#include <sound/soc-dapm.h>
+#include <dt-bindings/sound/qcom,q6dsp-lpass-ports.h>
+#include <dt-bindings/sound/qcom,q6voice.h>
 
 #define VSS_IMVM_CMD_CREATE_PASSIVE_CONTROL_SESSION	0x000110FF
-#define VSS_IMVM_CMD_CREATE_FULL_CONTROL_SESSION	0x000110FE
 #define VSS_IMVM_CMD_START_VOICE			0x00011190
 #define VSS_IMVM_CMD_STOP_VOICE				0x00011192
 
 #define VSS_ISTREAM_CMD_CREATE_PASSIVE_CONTROL_SESSION	0x00011140
-#define VSS_IMVM_CMD_ATTACH_STREAM			0x0001123C
-#define VSS_IMVM_CMD_DETACH_STREAM			0x0001123D
+#define VSS_IMVM_CMD_SET_POLICY_DUAL_CONTROL		0x00011327
 #define VSS_IMVM_CMD_ATTACH_VOCPROC			0x0001123E
 #define VSS_IMVM_CMD_DETACH_VOCPROC			0x0001123F
 #define VSS_IVOCPROC_CMD_CREATE_FULL_CONTROL_SESSION_V2	0x000112BF
+#define VSS_IVOCPROC_CMD_CREATE_FULL_CONTROL_SESSION_V3	0x00013169
+#define VSS_IVOCPROC_CMD_TOPOLOGY_SET_DEV_CHANNELS	0x00013199
+#define VSS_IVOCPROC_CMD_TOPOLOGY_COMMIT		0x00013198
+#define VSS_ICOMMON_CMD_SET_PARAM_V2			0x0001133D
+#define VSS_IVERSION_CMD_GET				0x00011378
+#define VSS_IVERSION_RSP_GET				0x00011379
 #define VSS_IVOCPROC_CMD_ENABLE				0x000100C6
 #define VSS_IVOCPROC_CMD_DISABLE			0x000110E1
 #define APRV2_IBASIC_CMD_DESTROY_SESSION		0x0001003C
+#define VSS_IVOLUME_CMD_MUTE_V2				0x0001138B
+
+#define VSS_IVOLUME_DIRECTION_TX			0
+#define VSS_IVOLUME_DIRECTION_RX			1
 
 #define VSS_IVOCPROC_DIRECTION_RX_TX			2
 #define VSS_IVOCPROC_PORT_ID_NONE			0xFFFF
 #define VSS_IVOCPROC_TOPOLOGY_ID_NONE			0x00010F70
-#define VSS_IVOCPROC_TOPOLOGY_ID_TX_SM_ECNS		0x00010F71
 #define VSS_IVOCPROC_TOPOLOGY_ID_RX_DEFAULT		0x00010F77
 
 /* AFE port IDs.  The WCD codec - and so the earpiece and the call mic - is
  * behind SLIMbus port 0 on this board.
  */
 #define AFE_PORT_ID_SLIMBUS_0_RX			0x4000
+#define AFE_PORT_ID_QUATERNARY_MI2S_RX			0x1006
+#define AFE_PORT_ID_QUATERNARY_MI2S_TX			0x1007
+#define VSS_IVOCPROC_VOCPROC_MODE_EC_EXT_MIXING		0x00010F7D
+#define VSS_PARAM_EC_REF_PORT_ENDPOINT_MEDIA_INFO	0x00013255
 #define AFE_PORT_ID_SLIMBUS_0_TX			0x4001
 #define VSS_IVOCPROC_VOCPROC_MODE_EC_INT_MIXING		0x00010F7C
 #define VSS_ICOMMON_CAL_NETWORK_ID_NONE			0x0001135E
+#define VSS_MODULE_CVD_GENERIC				0x0001316E
+#define VSS_PARAM_TX_PORT_ENDPOINT_MEDIA_INFO		0x00013253
+#define VSS_PARAM_RX_PORT_ENDPOINT_MEDIA_INFO		0x00013254
+#define PCM_CHANNEL_FL					1
+#define PCM_CHANNEL_FR					2
+#define PCM_CHANNEL_FC					3
+
+/* CVD versions, as the ADSP reports them, that change the vocproc setup */
+#define CVD_VERSION_2_2					22
+#define CVD_VERSION_2_3					23
 
 #define SESSION_NAME_LEN		20
 #define VOICEMMODE1_NAME		"11C05000"
@@ -68,7 +94,38 @@ struct vss_imvm_cmd_create_control_session {
 	char name[SESSION_NAME_LEN];
 } __packed;
 
-/* Both MVM and CVS attach commands carry a bare session handle. */
+struct vss_imvm_cmd_set_policy_dual_control {
+	u8 enable;
+} __packed;
+
+struct vss_ivolume_cmd_mute_v2 {
+	u16 direction;
+	u16 mute_flag;
+	u16 ramp_duration_ms;
+} __packed;
+
+struct vss_ivocproc_cmd_topology_set_dev_channels {
+	u16 tx_num_channels;
+	u16 rx_num_channels;
+} __packed;
+
+/* In-band VSS_ICOMMON_CMD_SET_PARAM_V2 carrying one parameter */
+struct vss_set_param_media_format {
+	u32 mem_handle;
+	u64 mem_address;
+	u32 payload_size;
+	u32 module_id;
+	u32 param_id;
+	u16 param_size;
+	u16 reserved;
+	u32 port_id;
+	u16 num_channels;
+	u16 bits_per_sample;
+	u32 sample_rate;
+	u8 channel_mapping[8];
+} __packed;
+
+/* MVM attach commands carry a bare session handle. */
 struct vss_cmd_attach_handle {
 	u16 handle;
 } __packed;
@@ -112,30 +169,28 @@ static struct q6voice_svc q6voice_cvp;
  */
 static DEFINE_MUTEX(q6voice_lock);
 
-static struct dentry *q6voice_debugfs;
-
 /* Whether a session has been started, so teardown can be idempotent. */
 static bool q6voice_session_up;
 
-/*
- * Which AFE ports and topologies the vocproc is built against.  Exposed as
- * parameters because the right answer depends on how the board routes voice.
- */
+/* AFE ports the vocproc is built against, chosen with the voice mixers */
 static u16 rx_port = AFE_PORT_ID_SLIMBUS_0_RX;
-module_param(rx_port, ushort, 0644);
-MODULE_PARM_DESC(rx_port, "AFE Rx port ID for the vocproc");
-
 static u16 tx_port = AFE_PORT_ID_SLIMBUS_0_TX;
-module_param(tx_port, ushort, 0644);
-MODULE_PARM_DESC(tx_port, "AFE Tx port ID for the vocproc");
+/* External echo reference port (0 = none: internal EC mixing) */
+static u16 ec_port;
 
-static uint rx_topology = VSS_IVOCPROC_TOPOLOGY_ID_RX_DEFAULT;
-module_param(rx_topology, uint, 0644);
-MODULE_PARM_DESC(rx_topology, "Rx vocproc topology ID");
+/*
+ * No calibration is loaded: Tx without processing, the default Rx chain.  The
+ * vocproc Rx device is mono only; Tx carries one channel per routed codec port
+ * (two digital mics).
+ */
+#define Q6VOICE_RX_TOPOLOGY	VSS_IVOCPROC_TOPOLOGY_ID_RX_DEFAULT
+#define Q6VOICE_TX_TOPOLOGY	VSS_IVOCPROC_TOPOLOGY_ID_NONE
+#define Q6VOICE_RX_CHANNELS	1
+#define Q6VOICE_TX_CHANNELS	2
 
-static uint tx_topology = VSS_IVOCPROC_TOPOLOGY_ID_TX_SM_ECNS;
-module_param(tx_topology, uint, 0644);
-MODULE_PARM_DESC(tx_topology, "Tx vocproc topology ID");
+/* CVD version string reported by the ADSP ("2.3"), and as a number (23) */
+static char q6voice_cvd_version[32];
+static unsigned int q6voice_cvd;
 
 static int q6voice_probe_svc(struct apr_device *adev, struct q6voice_svc *svc)
 {
@@ -176,6 +231,19 @@ static int q6voice_callback_svc(struct apr_device *adev,
 				struct q6voice_svc *svc)
 {
 	const struct aprv2_ibasic_rsp_result_t *result;
+
+	if (data->hdr.opcode == VSS_IVERSION_RSP_GET &&
+	    svc->opcode == VSS_IVERSION_CMD_GET) {
+		size_t n = min_t(size_t, data->payload_size,
+				 sizeof(q6voice_cvd_version) - 1);
+
+		memcpy(q6voice_cvd_version, data->payload, n);
+		q6voice_cvd_version[n] = '\0';
+		svc->status = 0;
+		svc->resp_received = true;
+		wake_up(&svc->wait);
+		return 0;
+	}
 
 	if (data->hdr.opcode != APR_BASIC_RSP_RESULT ||
 	    data->payload_size < sizeof(*result)) {
@@ -300,29 +368,123 @@ static int q6voice_create_vocproc(const char *name)
 	struct vss_ivocproc_cmd_create_full_control_session_v2 cvp = {
 		.direction	= VSS_IVOCPROC_DIRECTION_RX_TX,
 		.tx_port_id	= tx_port,
-		.tx_topology_id	= tx_topology,
+		.tx_topology_id	= Q6VOICE_TX_TOPOLOGY,
 		.rx_port_id	= rx_port,
-		.rx_topology_id	= rx_topology,
+		.rx_topology_id	= Q6VOICE_RX_TOPOLOGY,
 		.profile_id	= VSS_ICOMMON_CAL_NETWORK_ID_NONE,
-		.vocproc_mode	= VSS_IVOCPROC_VOCPROC_MODE_EC_INT_MIXING,
-		.ec_ref_port_id	= VSS_IVOCPROC_PORT_ID_NONE,
+		.vocproc_mode	= ec_port ? VSS_IVOCPROC_VOCPROC_MODE_EC_EXT_MIXING :
+					  VSS_IVOCPROC_VOCPROC_MODE_EC_INT_MIXING,
+		.ec_ref_port_id	= ec_port ?: VSS_IVOCPROC_PORT_ID_NONE,
 	};
 
 	strscpy(cvp.name, name, sizeof(cvp.name));
 
-	return q6voice_create(&q6voice_cvp,
+	return q6voice_create(&q6voice_cvp, q6voice_cvd >= CVD_VERSION_2_2 ?
+			      VSS_IVOCPROC_CMD_CREATE_FULL_CONTROL_SESSION_V3 :
 			      VSS_IVOCPROC_CMD_CREATE_FULL_CONTROL_SESSION_V2,
 			      &cvp, sizeof(cvp));
 }
 
+static int q6voice_set_port_format(u32 param_id, u16 port, u16 channels)
+{
+	struct vss_set_param_media_format p = {
+		.payload_size	= sizeof(p) - offsetof(typeof(p), module_id),
+		.module_id	= VSS_MODULE_CVD_GENERIC,
+		.param_id	= param_id,
+		.param_size	= sizeof(p) - offsetof(typeof(p), port_id),
+		.port_id	= port,
+		.num_channels	= channels,
+		.bits_per_sample = 16,
+		.sample_rate	= 48000,
+	};
+
+	if (channels == 1) {
+		p.channel_mapping[0] = PCM_CHANNEL_FC;
+	} else {
+		p.channel_mapping[0] = PCM_CHANNEL_FL;
+		p.channel_mapping[1] = PCM_CHANNEL_FR;
+	}
+
+	return q6voice_cmd(&q6voice_cvp, VSS_ICOMMON_CMD_SET_PARAM_V2,
+			   q6voice_cvp.handle, &p, sizeof(p));
+}
+
 /*
- * Bring up a voice session end to end.  The order matters: the modem owns the
- * state machine for a passive session, so every object has to exist and be
- * attached before START_VOICE.
+ * Tell the vocproc what the AFE ports carry (downstream
+ * voice_send_cvp_media_fmt_info_cmd() and topology commit): the SLIMbus back
+ * ends run at 48 kHz, 16 bit, one channel per routed codec port.
+ */
+static int q6voice_setup_vocproc(void)
+{
+	struct vss_ivocproc_cmd_topology_set_dev_channels ch = {
+		.tx_num_channels = Q6VOICE_TX_CHANNELS,
+		.rx_num_channels = Q6VOICE_RX_CHANNELS,
+	};
+	int ret;
+
+	if (q6voice_cvd < CVD_VERSION_2_2)
+		return 0;
+
+	ret = q6voice_cmd(&q6voice_cvp, VSS_IVOCPROC_CMD_TOPOLOGY_SET_DEV_CHANNELS,
+			  q6voice_cvp.handle, &ch, sizeof(ch));
+	if (ret)
+		return ret;
+
+	if (q6voice_cvd >= CVD_VERSION_2_3) {
+		ret = q6voice_set_port_format(VSS_PARAM_RX_PORT_ENDPOINT_MEDIA_INFO,
+					      rx_port, Q6VOICE_RX_CHANNELS);
+		if (ret)
+			return ret;
+		ret = q6voice_set_port_format(VSS_PARAM_TX_PORT_ENDPOINT_MEDIA_INFO,
+					      tx_port, Q6VOICE_TX_CHANNELS);
+		if (ret)
+			return ret;
+		/* The echo reference port runs mono (see the machine driver) */
+		if (ec_port) {
+			ret = q6voice_set_port_format(VSS_PARAM_EC_REF_PORT_ENDPOINT_MEDIA_INFO,
+						      ec_port, 1);
+			if (ret)
+				return ret;
+		}
+	}
+
+	return q6voice_cmd(&q6voice_cvp, VSS_IVOCPROC_CMD_TOPOLOGY_COMMIT,
+			   q6voice_cvp.handle, NULL, 0);
+}
+
+static void q6voice_get_version(void)
+{
+	unsigned int major = 0, minor = 0;
+
+	if (q6voice_cvd)
+		return;
+
+	q6voice_cvd_version[0] = '\0';
+	if (q6voice_cmd(&q6voice_mvm, VSS_IVERSION_CMD_GET, 0, NULL, 0) ||
+	    sscanf(q6voice_cvd_version, "%u.%u", &major, &minor) != 2)
+		major = minor = 0;
+	q6voice_cvd = major * 10 + minor;
+	dev_dbg(&q6voice_mvm.adev->dev, "CVD version '%s'\n",
+		 q6voice_cvd_version);
+}
+
+/*
+ * Bring up a voice session end to end, in the order the downstream driver uses
+ * for a modem call (voc_start_voice_call()).  The sessions are passive: the
+ * modem's own full-control session of the same name owns the state machine and
+ * attaches the stream itself (attaching it again fails with EALREADY), and
+ * dual control lets the modem start and stop the voice path with the call.
  */
 static int q6voice_build_session(const char *name)
 {
+	struct vss_imvm_cmd_set_policy_dual_control dual = { .enable = 1 };
+	struct vss_ivolume_cmd_mute_v2 unmute = {
+		.direction = VSS_IVOLUME_DIRECTION_TX,
+		.ramp_duration_ms = 20,
+	};
 	int ret;
+
+	q6voice_get_version();
 
 	ret = q6voice_create_session(&q6voice_mvm,
 				     VSS_IMVM_CMD_CREATE_PASSIVE_CONTROL_SESSION,
@@ -336,12 +498,16 @@ static int q6voice_build_session(const char *name)
 	if (ret)
 		return ret;
 
-	ret = q6voice_attach(&q6voice_mvm, VSS_IMVM_CMD_ATTACH_STREAM,
-			     q6voice_mvm.handle, q6voice_cvs.handle);
+	ret = q6voice_cmd(&q6voice_mvm, VSS_IMVM_CMD_SET_POLICY_DUAL_CONTROL,
+			  q6voice_mvm.handle, &dual, sizeof(dual));
 	if (ret)
 		return ret;
 
 	ret = q6voice_create_vocproc(name);
+	if (ret)
+		return ret;
+
+	ret = q6voice_setup_vocproc();
 	if (ret)
 		return ret;
 
@@ -355,14 +521,22 @@ static int q6voice_build_session(const char *name)
 	if (ret)
 		return ret;
 
+	/* Unmute the Tx stream and the Rx device; not fatal, as downstream */
+	if (q6voice_cmd(&q6voice_cvs, VSS_IVOLUME_CMD_MUTE_V2,
+			q6voice_cvs.handle, &unmute, sizeof(unmute)))
+		dev_warn(&q6voice_cvs.adev->dev, "Tx unmute failed\n");
+	unmute.direction = VSS_IVOLUME_DIRECTION_RX;
+	if (q6voice_cmd(&q6voice_cvp, VSS_IVOLUME_CMD_MUTE_V2,
+			q6voice_cvp.handle, &unmute, sizeof(unmute)))
+		dev_warn(&q6voice_cvp.adev->dev, "Rx unmute failed\n");
+
 	ret = q6voice_cmd(&q6voice_mvm, VSS_IMVM_CMD_START_VOICE,
 			  q6voice_mvm.handle, NULL, 0);
 	if (ret)
 		return ret;
 
 	q6voice_session_up = true;
-
-	dev_info(&q6voice_mvm.adev->dev, "voice session started\n");
+	dev_dbg(&q6voice_mvm.adev->dev, "voice session started\n");
 
 	return 0;
 }
@@ -419,13 +593,6 @@ static int q6voice_stop_voice(void)
 			q6voice_cvp.handle = 0;
 	}
 
-	if (q6voice_mvm.handle && q6voice_cvs.handle) {
-		ret = q6voice_attach(&q6voice_mvm, VSS_IMVM_CMD_DETACH_STREAM,
-				     q6voice_mvm.handle, q6voice_cvs.handle);
-		if (ret)
-			err = ret;
-	}
-
 	if (q6voice_cvs.handle) {
 		ret = q6voice_cmd(&q6voice_cvs, APRV2_IBASIC_CMD_DESTROY_SESSION,
 				  q6voice_cvs.handle, NULL, 0);
@@ -446,7 +613,7 @@ static int q6voice_stop_voice(void)
 
 	q6voice_session_up = false;
 
-	dev_info(&q6voice_mvm.adev->dev, "voice session torn down%s\n",
+	dev_dbg(&q6voice_mvm.adev->dev, "voice session torn down%s\n",
 		 err ? " (with errors)" : "");
 
 	return err;
@@ -477,65 +644,343 @@ static int q6voice_start_voice(const char *name)
 	return 0;
 }
 
-static int q6voice_create_set(void *data, u64 val)
+
+/*
+ * CS-VOICE front end.  Opening its playback and capture PCMs starts the AFE
+ * back ends routed to it with the "Voice Mixer" switches -- for voice alone,
+ * with no ADM stream on the port -- and, once both are prepared, the voice
+ * session on those ports.  No audio data passes through the PCMs themselves.
+ */
+static unsigned int q6voice_dai_active;
+
+static int q6voice_dai_prepare(struct snd_pcm_substream *substream,
+			       struct snd_soc_dai *dai)
 {
-	if (!val)
-		return 0;
+	int ret = 0;
 
 	guard(mutex)(&q6voice_lock);
 
-	if (q6voice_mvm.handle)
-		return -EBUSY;
+	dev_dbg(dai->dev, "prepare %s\n", substream->stream ? "capture" : "playback");
+	q6voice_dai_active |= BIT(substream->stream);
+	if (q6voice_dai_active == 3 && !q6voice_session_up)
+		ret = q6voice_start_voice(VOICEMMODE1_NAME);
 
-	return q6voice_create_session(&q6voice_mvm,
-				      VSS_IMVM_CMD_CREATE_PASSIVE_CONTROL_SESSION,
-				      VOICEMMODE1_NAME);
+	return ret;
 }
-DEFINE_DEBUGFS_ATTRIBUTE(q6voice_create_fops, NULL, q6voice_create_set, "%llu\n");
 
-static int q6voice_start_set(void *data, u64 val)
+/*
+ * Stop the session in hw_free: DPCM frees the front end before the back
+ * ends, so the vocproc is gone before its AFE ports stop.  Stopping the
+ * ports under a running vocproc left SLIMBUS_0_TX refusing to start again
+ * (AFE error 1) and then hung the system.
+ */
+static int q6voice_dai_hw_free(struct snd_pcm_substream *substream,
+			       struct snd_soc_dai *dai)
 {
 	guard(mutex)(&q6voice_lock);
 
-	if (val)
-		return q6voice_start_voice(VOICEMMODE1_NAME);
-
-	return q6voice_stop_voice();
-}
-DEFINE_DEBUGFS_ATTRIBUTE(q6voice_start_fops, NULL, q6voice_start_set, "%llu\n");
-
-static int q6voice_handle_get(void *data, u64 *val)
-{
-	*val = q6voice_mvm.handle;
+	q6voice_dai_active &= ~BIT(substream->stream);
+	if (q6voice_session_up || q6voice_mvm.handle)
+		q6voice_stop_voice();
 	return 0;
 }
-DEFINE_DEBUGFS_ATTRIBUTE(q6voice_handle_fops, q6voice_handle_get, NULL, "%llu\n");
 
-static int q6voice_bound_get(void *data, u64 *val)
+static void q6voice_dai_shutdown(struct snd_pcm_substream *substream,
+				 struct snd_soc_dai *dai)
 {
-	*val = (q6voice_mvm.adev ? BIT(0) : 0) |
-	       (q6voice_cvs.adev ? BIT(1) : 0) |
-	       (q6voice_cvp.adev ? BIT(2) : 0);
+	q6voice_dai_hw_free(substream, dai);
+}
+
+static const struct snd_soc_dai_ops q6voice_dai_ops = {
+	.prepare = q6voice_dai_prepare,
+	.hw_free = q6voice_dai_hw_free,
+	.shutdown = q6voice_dai_shutdown,
+};
+
+static struct snd_soc_dai_driver q6voice_dais[] = {
+	{
+		.id = CS_VOICE,
+		.name = "CS-VOICE",
+		.playback = {
+			.stream_name = "CS-VOICE Playback",
+			.formats = SNDRV_PCM_FMTBIT_S16_LE,
+			.rates = SNDRV_PCM_RATE_8000,
+			.rate_min = 8000,
+			.rate_max = 8000,
+			.channels_min = 1,
+			.channels_max = 1,
+		},
+		.capture = {
+			.stream_name = "CS-VOICE Capture",
+			.formats = SNDRV_PCM_FMTBIT_S16_LE,
+			.rates = SNDRV_PCM_RATE_8000,
+			.rate_min = 8000,
+			.rate_max = 8000,
+			.channels_min = 1,
+			.channels_max = 1,
+		},
+		.ops = &q6voice_dai_ops,
+	},
+};
+
+static const struct snd_pcm_hardware q6voice_dai_hardware = {
+	.info = SNDRV_PCM_INFO_INTERLEAVED,
+	.buffer_bytes_max = 4096 * 2,
+	.period_bytes_min = 2048,
+	.period_bytes_max = 4096,
+	.periods_min = 2,
+	.periods_max = 4,
+};
+
+
+/*
+ * Voice data never passes through the PCM; give it a buffer nobody reads so
+ * ordinary ALSA clients can open, start and keep it running.
+ */
+static int q6voice_pcm_new(struct snd_soc_component *component,
+			   struct snd_soc_pcm_runtime *rtd)
+{
+	snd_pcm_set_managed_buffer_all(rtd->pcm, SNDRV_DMA_TYPE_CONTINUOUS,
+				       NULL, 0, q6voice_dai_hardware.buffer_bytes_max);
 	return 0;
 }
-DEFINE_DEBUGFS_ATTRIBUTE(q6voice_bound_fops, q6voice_bound_get, NULL, "%llu\n");
 
-static void q6voice_debugfs_init(void)
+/*
+ * A timer moves the PCM position along at the stream rate, so clients see a
+ * running stream (and keep it, and the voice path, open) for the whole call.
+ */
+struct q6voice_pcm {
+	struct hrtimer timer;
+	struct snd_pcm_substream *substream;
+	snd_pcm_uframes_t pos;
+	ktime_t period;
+};
+
+static enum hrtimer_restart q6voice_pcm_tick(struct hrtimer *t)
 {
-	q6voice_debugfs = debugfs_create_dir("q6voice", NULL);
-	debugfs_create_file("create_session", 0200, q6voice_debugfs, NULL,
-			    &q6voice_create_fops);
-	debugfs_create_file("start_voice", 0200, q6voice_debugfs, NULL,
-			    &q6voice_start_fops);
-	debugfs_create_file("mvm_handle", 0400, q6voice_debugfs, NULL,
-			    &q6voice_handle_fops);
-	debugfs_create_file("bound", 0400, q6voice_debugfs, NULL,
-			    &q6voice_bound_fops);
+	struct q6voice_pcm *vp = container_of(t, struct q6voice_pcm, timer);
+	struct snd_pcm_substream *ss = vp->substream;
+	struct snd_pcm_runtime *rt = ss->runtime;
+	snd_pcm_sframes_t room;
+
+	/*
+	 * Never run past the client: an xrun stops the stream, and DPCM then
+	 * stops the back ends (and the call audio) with it.  Advance at most to
+	 * one frame short of what has been written (playback), or of a full
+	 * buffer of unread frames (capture).
+	 */
+	if (ss->stream == SNDRV_PCM_STREAM_PLAYBACK) {
+		/* frames written but not yet "played" */
+		room = (snd_pcm_sframes_t)rt->control->appl_ptr -
+		       (snd_pcm_sframes_t)rt->status->hw_ptr;
+		if (room < 0)
+			room += rt->boundary;
+	} else {
+		/* free space: buffer minus frames captured but not yet read */
+		room = (snd_pcm_sframes_t)rt->status->hw_ptr -
+		       (snd_pcm_sframes_t)rt->control->appl_ptr;
+		if (room < 0)
+			room += rt->boundary;
+		room = rt->buffer_size - room;
+	}
+	room--;
+
+	vp->pos = (vp->pos + clamp_t(snd_pcm_sframes_t, room, 0,
+				     rt->period_size)) % rt->buffer_size;
+	snd_pcm_period_elapsed(ss);
+	hrtimer_forward_now(t, vp->period);
+	return HRTIMER_RESTART;
 }
+
+static int q6voice_pcm_trigger(struct snd_soc_component *component,
+			       struct snd_pcm_substream *substream, int cmd)
+{
+	struct q6voice_pcm *vp = substream->runtime->private_data;
+	struct snd_pcm_runtime *rt = substream->runtime;
+
+	switch (cmd) {
+	case SNDRV_PCM_TRIGGER_START:
+	case SNDRV_PCM_TRIGGER_RESUME:
+	case SNDRV_PCM_TRIGGER_PAUSE_RELEASE:
+		vp->period = ns_to_ktime(div_u64((u64)rt->period_size *
+						 NSEC_PER_SEC, rt->rate));
+		hrtimer_start(&vp->timer, vp->period, HRTIMER_MODE_REL_SOFT);
+		break;
+	case SNDRV_PCM_TRIGGER_STOP:
+	case SNDRV_PCM_TRIGGER_SUSPEND:
+	case SNDRV_PCM_TRIGGER_PAUSE_PUSH:
+		hrtimer_try_to_cancel(&vp->timer);
+		break;
+	default:
+		return -EINVAL;
+	}
+	return 0;
+}
+
+static snd_pcm_uframes_t q6voice_pcm_pointer(struct snd_soc_component *component,
+					     struct snd_pcm_substream *substream)
+{
+	struct q6voice_pcm *vp = substream->runtime->private_data;
+
+	return vp->pos;
+}
+
+static int q6voice_pcm_close(struct snd_soc_component *component,
+			     struct snd_pcm_substream *substream)
+{
+	struct q6voice_pcm *vp = substream->runtime->private_data;
+
+	hrtimer_cancel(&vp->timer);
+	kfree(vp);
+	return 0;
+}
+
+static int q6voice_pcm_open(struct snd_soc_component *component,
+			    struct snd_pcm_substream *substream)
+{
+	struct q6voice_pcm *vp = kzalloc(sizeof(*vp), GFP_KERNEL);
+
+	if (!vp)
+		return -ENOMEM;
+	hrtimer_setup(&vp->timer, q6voice_pcm_tick, CLOCK_MONOTONIC,
+		      HRTIMER_MODE_REL_SOFT);
+	vp->substream = substream;
+	substream->runtime->private_data = vp;
+	substream->runtime->hw = q6voice_dai_hardware;
+	return 0;
+}
+
+static unsigned int q6voice_reg_read(struct snd_soc_component *component,
+				     unsigned int reg)
+{
+	return 0;
+}
+
+static int q6voice_reg_write(struct snd_soc_component *component,
+			     unsigned int reg, unsigned int val)
+{
+	return 0;
+}
+
+/* Mixer switch: reg = AFE port ID; shift 0 = Rx, 1 = Tx (mic), 2 = echo reference */
+static int q6voice_mixer_get(struct snd_kcontrol *kc,
+			     struct snd_ctl_elem_value *uc)
+{
+	struct soc_mixer_control *mc = (void *)kc->private_value;
+
+	uc->value.integer.value[0] =
+		(mc->shift == 2 ? ec_port : mc->shift ? tx_port : rx_port) == mc->reg;
+	return 0;
+}
+
+static int q6voice_mixer_put(struct snd_kcontrol *kc,
+			     struct snd_ctl_elem_value *uc)
+{
+	struct snd_soc_dapm_context *dapm = snd_soc_dapm_kcontrol_to_dapm(kc);
+	struct soc_mixer_control *mc = (void *)kc->private_value;
+	bool on = !!uc->value.integer.value[0];
+	u16 *port = mc->shift == 2 ? &ec_port : mc->shift ? &tx_port : &rx_port;
+
+	/*
+	 * Route changes during a call (earpiece <-> speaker): stop the session
+	 * before its port is disconnected, and start it again once the new
+	 * back end is connected.
+	 */
+	if (!on && *port == mc->reg) {
+		guard(mutex)(&q6voice_lock);
+		if (q6voice_session_up)
+			q6voice_stop_voice();
+	}
+
+	if (on)
+		*port = mc->reg;
+	else if (mc->shift == 2 && *port == mc->reg)
+		*port = 0;
+	snd_soc_dapm_mixer_update_power(dapm, kc, on, NULL);
+
+	if (on) {
+		guard(mutex)(&q6voice_lock);
+		if (q6voice_session_up)
+			q6voice_stop_voice();
+		if (q6voice_dai_active == 3)
+			q6voice_start_voice(VOICEMMODE1_NAME);
+	}
+	return 1;
+}
+
+static const struct snd_kcontrol_new q6voice_tx_mixer[] = {
+	SOC_SINGLE_EXT("SLIMBUS_0_TX", AFE_PORT_ID_SLIMBUS_0_TX, 1, 1, 0,
+		       q6voice_mixer_get, q6voice_mixer_put),
+};
+
+static const struct snd_kcontrol_new q6voice_ec_mixer[] = {
+	SOC_SINGLE_EXT("QUAT_MI2S_TX", AFE_PORT_ID_QUATERNARY_MI2S_TX, 2, 1, 0,
+		       q6voice_mixer_get, q6voice_mixer_put),
+};
+
+static const struct snd_kcontrol_new q6voice_slim0_rx_mixer[] = {
+	SOC_SINGLE_EXT("CS-Voice", AFE_PORT_ID_SLIMBUS_0_RX, 0, 1, 0,
+		       q6voice_mixer_get, q6voice_mixer_put),
+};
+
+static const struct snd_kcontrol_new q6voice_quat_rx_mixer[] = {
+	SOC_SINGLE_EXT("CS-Voice", AFE_PORT_ID_QUATERNARY_MI2S_RX, 0, 1, 0,
+		       q6voice_mixer_get, q6voice_mixer_put),
+};
+
+static const struct snd_soc_dapm_widget q6voice_widgets[] = {
+	SND_SOC_DAPM_AIF_IN("CS-VOICE_DL1", "CS-VOICE Playback", 0,
+			    SND_SOC_NOPM, 0, 0),
+	SND_SOC_DAPM_AIF_OUT("CS-VOICE_UL1", "CS-VOICE Capture", 0,
+			     SND_SOC_NOPM, 0, 0),
+	SND_SOC_DAPM_MIXER("CS-Voice Capture Mixer", SND_SOC_NOPM, 0, 0,
+			   q6voice_tx_mixer, ARRAY_SIZE(q6voice_tx_mixer)),
+	/* The amplifier feedback on QUAT MI2S TX: no codec, so give it a source */
+	SND_SOC_DAPM_INPUT("Speaker Feedback"),
+	SND_SOC_DAPM_MIXER("CS-Voice EC Mixer", SND_SOC_NOPM, 0, 0,
+			   q6voice_ec_mixer, ARRAY_SIZE(q6voice_ec_mixer)),
+	SND_SOC_DAPM_MIXER("SLIMBUS_0_RX Voice Mixer", SND_SOC_NOPM, 0, 0,
+			   q6voice_slim0_rx_mixer,
+			   ARRAY_SIZE(q6voice_slim0_rx_mixer)),
+	SND_SOC_DAPM_MIXER("QUAT_MI2S_RX Voice Mixer", SND_SOC_NOPM, 0, 0,
+			   q6voice_quat_rx_mixer,
+			   ARRAY_SIZE(q6voice_quat_rx_mixer)),
+};
+
+static const struct snd_soc_dapm_route q6voice_routes[] = {
+	{ "CS-Voice Capture Mixer", "SLIMBUS_0_TX", "SLIMBUS_0_TX" },
+	{ "CS-VOICE_UL1", NULL, "CS-Voice Capture Mixer" },
+	{ "Quaternary MI2S Capture", NULL, "Speaker Feedback" },
+	{ "CS-Voice EC Mixer", "QUAT_MI2S_TX", "QUAT_MI2S_TX" },
+	{ "CS-VOICE_UL1", NULL, "CS-Voice EC Mixer" },
+	{ "SLIMBUS_0_RX Voice Mixer", "CS-Voice", "CS-VOICE_DL1" },
+	{ "SLIMBUS_0_RX", NULL, "SLIMBUS_0_RX Voice Mixer" },
+	{ "QUAT_MI2S_RX Voice Mixer", "CS-Voice", "CS-VOICE_DL1" },
+	{ "QUAT_MI2S_RX", NULL, "QUAT_MI2S_RX Voice Mixer" },
+};
+
+static const struct snd_soc_component_driver q6voice_component = {
+	.name = "q6voice-dai",
+	.open = q6voice_pcm_open,
+	.pcm_new = q6voice_pcm_new,
+	.pointer = q6voice_pcm_pointer,
+	.trigger = q6voice_pcm_trigger,
+	.close = q6voice_pcm_close,
+	.read = q6voice_reg_read,
+	.write = q6voice_reg_write,
+	.dapm_widgets = q6voice_widgets,
+	.num_dapm_widgets = ARRAY_SIZE(q6voice_widgets),
+	.dapm_routes = q6voice_routes,
+	.num_dapm_routes = ARRAY_SIZE(q6voice_routes),
+	/* The routes name q6afe back-end widgets */
+	.probe_order = SND_SOC_COMP_ORDER_LATE,
+};
 
 #define Q6VOICE_SVC_DRIVER(_name, _compat)				\
 static int q6##_name##_probe(struct apr_device *adev)			\
 {									\
+	if (&q6voice_##_name == &q6voice_mvm)				\
+		return q6voice_mvm_probe(adev);				\
 	return q6voice_probe_svc(adev, &q6voice_##_name);		\
 }									\
 static void q6##_name##_remove(struct apr_device *adev)		\
@@ -562,6 +1007,19 @@ static struct apr_driver q6##_name##_driver = {			\
 	},								\
 }
 
+static int q6voice_mvm_probe(struct apr_device *adev)
+{
+	int ret;
+
+	ret = q6voice_probe_svc(adev, &q6voice_mvm);
+	if (ret)
+		return ret;
+
+	return devm_snd_soc_register_component(&adev->dev, &q6voice_component,
+					       q6voice_dais,
+					       ARRAY_SIZE(q6voice_dais));
+}
+
 Q6VOICE_SVC_DRIVER(mvm, "qcom,q6mvm");
 Q6VOICE_SVC_DRIVER(cvs, "qcom,q6cvs");
 Q6VOICE_SVC_DRIVER(cvp, "qcom,q6cvp");
@@ -582,8 +1040,6 @@ static int __init q6voice_init(void)
 			goto err;
 	}
 
-	q6voice_debugfs_init();
-
 	return 0;
 
 err:
@@ -597,8 +1053,6 @@ module_init(q6voice_init);
 static void __exit q6voice_exit(void)
 {
 	int i;
-
-	debugfs_remove_recursive(q6voice_debugfs);
 
 	scoped_guard(mutex, &q6voice_lock)
 		q6voice_stop_voice();
