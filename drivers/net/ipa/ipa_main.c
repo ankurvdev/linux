@@ -317,7 +317,7 @@ ipa_hardware_config_qsb(struct ipa *ipa, const struct ipa_data *data)
 		val |= reg_encode(reg, GEN_QMB_0_MAX_READS_BEATS,
 				  data0->max_reads_beats);
 	if (data->qsb_count > 1) {
-		val = reg_encode(reg, GEN_QMB_1_MAX_READS, data1->max_reads);
+		val |= reg_encode(reg, GEN_QMB_1_MAX_READS, data1->max_reads);
 		if (ipa->version >= IPA_VERSION_4_0)
 			val |= reg_encode(reg, GEN_QMB_1_MAX_READS_BEATS,
 					  data1->max_reads_beats);
