@@ -320,6 +320,15 @@ static int ath10k_install_key(struct ath10k_vif *arvif,
 	if (arvif->nohwcrypt)
 		return 1;
 
+	/*
+	 * WCN3990 firmware 1.0.0.469 (MSM8998) never answers key deletion, so
+	 * every disconnect (and suspend) waited 3 s for the timeout. Deleting
+	 * the peer drops its keys in firmware, and a new key replaces an old
+	 * one at the same index, so leave deletion out.
+	 */
+	if (cmd == DISABLE_KEY && ar->hw_rev == ATH10K_HW_WCN3990)
+		return 0;
+
 	ret = ath10k_send_key(arvif, key, cmd, macaddr, flags);
 	if (ret)
 		return ret;
