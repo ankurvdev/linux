@@ -139,6 +139,7 @@ struct qca_dump_size {
 
 struct qca_data {
 	struct hci_uart *hu;
+	bool no_ibs;		/* in-band sleep unusable on this board */
 	struct sk_buff *rx_skb;
 	struct sk_buff_head txq;
 	struct sk_buff_head tx_wait_q;	/* HCI_IBS wait queue	*/
@@ -228,6 +229,7 @@ struct qca_serdev {
 	u32 init_speed;
 	u32 oper_speed;
 	bool bdaddr_property_broken;
+	bool no_ibs;
 	bool support_hfp_hw_offload;
 	const char *firmware_name[2];
 };
@@ -620,6 +622,7 @@ static int qca_open(struct hci_uart *hu)
 
 	if (hu->serdev) {
 		qcadev = serdev_device_get_drvdata(hu->serdev);
+		qca->no_ibs = qcadev->no_ibs;
 
 		switch (qcadev->btsoc_type) {
 		case QCA_WCN3950:
@@ -916,7 +919,7 @@ static int qca_enqueue(struct hci_uart *hu, struct sk_buff *skb)
 	 * Out-Of-Band(GPIOs control) sleep is selected.
 	 * Don't wake the device up when suspending.
 	 */
-	if (test_bit(QCA_IBS_DISABLED, &qca->flags) ||
+	if (qca->no_ibs || test_bit(QCA_IBS_DISABLED, &qca->flags) ||
 	    test_bit(QCA_SUSPENDING, &qca->flags)) {
 		skb_queue_tail(&qca->txq, skb);
 		spin_unlock_irqrestore(&qca->hci_ibs_lock, flags);
@@ -2030,7 +2033,8 @@ retry:
 
 	/* Setup patch / NVM configurations */
 	ret = qca_uart_setup(hdev, qca_baudrate, soc_type, ver,
-			firmware_name, rampatch_name);
+			firmware_name, rampatch_name,
+			!qca->no_ibs);
 	if (!ret) {
 		clear_bit(QCA_IBS_DISABLED, &qca->flags);
 		qca_debugfs_init(hdev);
@@ -2420,6 +2424,9 @@ static int qca_serdev_probe(struct serdev_device *serdev)
 	qcadev->bdaddr_property_broken = device_property_read_bool(&serdev->dev,
 			"qcom,local-bd-address-broken");
 
+	qcadev->no_ibs = device_property_read_bool(&serdev->dev,
+			"qcom,no-inband-sleep");
+
 	if (data)
 		qcadev->btsoc_type = data->soc_type;
 	else
@@ -2663,10 +2670,10 @@ static int __maybe_unused qca_suspend(struct device *dev)
 
 	set_bit(QCA_SUSPENDING, &qca->flags);
 
-	/* if BT SoC is running with default firmware then it does not
-	 * support in-band sleep
+	/* if BT SoC is running with default firmware, or the board cannot
+	 * use in-band sleep, there is no sleep handshake to do
 	 */
-	if (test_bit(QCA_ROM_FW, &qca->flags))
+	if (test_bit(QCA_ROM_FW, &qca->flags) || qca->no_ibs)
 		return 0;
 
 	/* During SSR after memory dump collection, controller will be

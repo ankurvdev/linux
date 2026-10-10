@@ -423,7 +423,8 @@ static int qca_tlv_check_data(struct hci_dev *hdev,
 				 * enabling software inband sleep
 				 * onto controller side.
 				 */
-				tlv_nvm->data[0] |= 0x80;
+				if (!config->no_sleep)
+					tlv_nvm->data[0] |= 0x80;
 
 				/* UART Baud Rate */
 				if (soc_type >= QCA_WCN3991)
@@ -440,7 +441,8 @@ static int qca_tlv_check_data(struct hci_dev *hdev,
 				/* Sleep enable mask
 				 * enabling deep sleep feature on controller.
 				 */
-				tlv_nvm->data[0] |= 0x01;
+				if (!config->no_sleep)
+					tlv_nvm->data[0] |= 0x01;
 
 				break;
 			}
@@ -748,7 +750,8 @@ static void qca_get_nvm_name_by_board(char *fwname, size_t max_size,
 
 int qca_uart_setup(struct hci_dev *hdev, uint8_t baudrate,
 		   enum qca_btsoc_type soc_type, struct qca_btsoc_version ver,
-		   const char *firmware_name, const char *rampatch_name)
+		   const char *firmware_name, const char *rampatch_name,
+		   bool inband_sleep)
 {
 	struct qca_fw_config config = {};
 	const char *variant = "";
@@ -764,6 +767,7 @@ int qca_uart_setup(struct hci_dev *hdev, uint8_t baudrate,
 	bt_dev_info(hdev, "QCA controller version 0x%08x", soc_ver);
 
 	config.user_baud_rate = baudrate;
+	config.no_sleep = !inband_sleep;
 
 	/* Firmware files to download are based on ROM version.
 	 * ROM version is derived from last two bytes of soc_ver.
