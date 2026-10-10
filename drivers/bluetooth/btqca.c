@@ -688,8 +688,14 @@ static int qca_check_bdaddr(struct hci_dev *hdev, const struct qca_fw_config *co
 	struct sk_buff *skb;
 	int err;
 
-	if (bacmp(&hdev->public_addr, BDADDR_ANY))
+	/* An address configured from userspace (mgmt Set Public Address)
+	 * before the first setup must be programmed again after every
+	 * setup: the NVM download puts the default address back.
+	 */
+	if (bacmp(&hdev->public_addr, BDADDR_ANY)) {
+		hci_set_quirk(hdev, HCI_QUIRK_USE_BDADDR_PROPERTY);
 		return 0;
+	}
 
 	skb = __hci_cmd_sync(hdev, HCI_OP_READ_BD_ADDR, 0, NULL,
 			     HCI_INIT_TIMEOUT);
