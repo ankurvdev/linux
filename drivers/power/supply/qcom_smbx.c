@@ -113,6 +113,10 @@
 #define OTG_ENG_OTG_CFG					0x1C0
 #define ENG_BUCKBOOST_HALT1_8_MODE_BIT			BIT(0)
 
+#define TYPE_C_STATUS_1					0x30b
+#define UFP_TYPEC_RD1P5_BIT				BIT(6)
+#define UFP_TYPEC_RD3P0_BIT				BIT(5)
+
 #define APSD_STATUS					0x307
 #define APSD_STATUS_7_BIT				BIT(7)
 #define HVDCP_CHECK_TIMEOUT_BIT				BIT(6)
@@ -348,6 +352,8 @@
 #define SDP_CURRENT_UA					500000
 #define CDP_CURRENT_UA					1500000
 #define DCP_CURRENT_UA					1500000
+#define TYPEC_MEDIUM_CURRENT_UA				1500000
+#define TYPEC_HIGH_CURRENT_UA				3000000
 #define CURRENT_MAX_UA					DCP_CURRENT_UA
 
 /* pmi8998 registers represent current in increments of 1/40th of an amp */
@@ -549,7 +555,7 @@ static int smb_set_current_limit(struct smb_chip *chip, unsigned int val)
 
 static void smb_status_change_work(struct work_struct *work)
 {
-	unsigned int charger_type, current_ua;
+	unsigned int charger_type, current_ua, stat;
 	int usb_online = 0;
 	int count, rc;
 	struct smb_chip *chip;
@@ -593,6 +599,18 @@ static void smb_status_change_work(struct work_struct *work)
 	default:
 		current_ua = SDP_CURRENT_UA;
 		break;
+	}
+
+	/*
+	 * A Type-C source may advertise more than BC1.2 allows (Rp 1.5 A or
+	 * 3.0 A); use that, AICL still backs off if the source sags.
+	 */
+	rc = regmap_read(chip->regmap, chip->base + TYPE_C_STATUS_1, &stat);
+	if (!rc) {
+		if (stat & UFP_TYPEC_RD3P0_BIT)
+			current_ua = max_t(unsigned int, current_ua, TYPEC_HIGH_CURRENT_UA);
+		else if (stat & UFP_TYPEC_RD1P5_BIT)
+			current_ua = max_t(unsigned int, current_ua, TYPEC_MEDIUM_CURRENT_UA);
 	}
 
 	smb_set_current_limit(chip, current_ua);
