@@ -3205,11 +3205,18 @@ static void ath10k_bss_disassoc(struct ieee80211_hw *hw,
 
 	arvif->def_wep_key_idx = -1;
 
-	ret = ath10k_mac_vif_recalc_txbf(ar, vif, vht_cap);
-	if (ret) {
-		ath10k_warn(ar, "failed to recalc txbf for vdev %i: %d\n",
-			    arvif->vdev_id, ret);
-		return;
+	/*
+	 * WCN3990 firmware 1.0.0.469 (MSM8998) crashes ~80 ms after the TXBF
+	 * vdev parameter is cleared on a vdev that is down. The next
+	 * association sets it again, so skip the reset there.
+	 */
+	if (ar->hw_rev != ATH10K_HW_WCN3990) {
+		ret = ath10k_mac_vif_recalc_txbf(ar, vif, vht_cap);
+		if (ret) {
+			ath10k_warn(ar, "failed to recalc txbf for vdev %i: %d\n",
+				    arvif->vdev_id, ret);
+			return;
+		}
 	}
 
 	arvif->is_up = false;
