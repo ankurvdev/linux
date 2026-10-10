@@ -2677,6 +2677,15 @@ static int __maybe_unused qca_suspend(struct device *dev)
 	    !test_bit(QCA_SSR_TRIGGERED, &qca->flags))
 		return 0;
 
+	/* hci_uart_close() closes the port of controllers with
+	 * HCI_QUIRK_NON_PERSISTENT_SETUP without setting QCA_BT_OFF, e.g.
+	 * when the controller was never brought up after setup. There is
+	 * nothing to put to sleep then, and the serdev calls below would
+	 * dereference the closed port's tty.
+	 */
+	if (!test_bit(HCI_UART_PROTO_READY, &hu->flags))
+		return 0;
+
 	if (test_bit(QCA_IBS_DISABLED, &qca->flags) ||
 	    test_bit(QCA_SSR_TRIGGERED, &qca->flags)) {
 		wait_timeout = test_bit(QCA_SSR_TRIGGERED, &qca->flags) ?
