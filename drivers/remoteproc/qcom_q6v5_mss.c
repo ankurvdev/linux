@@ -33,6 +33,8 @@
 #include "qcom_common.h"
 #include "qcom_pil_info.h"
 #include "qcom_q6v5.h"
+#include <linux/cpufreq.h>
+#include <linux/pm_qos.h>
 
 #include <linux/firmware/qcom/qcom_pas.h>
 #include <linux/firmware/qcom/qcom_scm.h>
@@ -175,9 +177,18 @@ struct rproc_hexagon_res {
 	bool has_vq6;
 };
 
+#define Q6V5_BOOT_QOS_MAX_POLICIES	4
+#define Q6V5_BOOT_QOS_HOLD_MS		60000
+
 struct q6v5 {
 	struct device *dev;
 	struct rproc *rproc;
+
+	/* CPU frequency floor held while the modem boots (see q6v5_boot_qos()) */
+	bool boost_cpus_during_boot;
+	struct freq_qos_request boot_qos[Q6V5_BOOT_QOS_MAX_POLICIES];
+	int boot_qos_count;
+	struct delayed_work boot_qos_release;
 
 	void __iomem *reg_base;
 	void __iomem *rmb_base;
@@ -1670,11 +1681,70 @@ static void qcom_q6v5_dump_segment(struct rproc *rproc,
 	}
 }
 
+/*
+ * On MSM8998 with the kernel-programmed OSM, the modem often stays silent on
+ * boot (and then crash-loops) when the CPU clusters sit at their low corners
+ * while it starts; with the CPUs at their top frequencies it boots fine, like
+ * downstream, which moves the clusters to high boot rates when it enables the
+ * OSM. Hold every cpufreq policy at its maximum while the modem boots.
+ */
+static void q6v5_boot_qos_drop(struct q6v5 *qproc)
+{
+	int i;
+
+	for (i = 0; i < qproc->boot_qos_count; i++)
+		freq_qos_remove_request(&qproc->boot_qos[i]);
+	qproc->boot_qos_count = 0;
+}
+
+static void q6v5_boot_qos_release_work(struct work_struct *work)
+{
+	struct q6v5 *qproc = container_of(to_delayed_work(work), struct q6v5,
+					  boot_qos_release);
+
+	q6v5_boot_qos_drop(qproc);
+}
+
+static void q6v5_boot_qos(struct q6v5 *qproc)
+{
+	struct cpufreq_policy *policy;
+	unsigned int cpu;
+	int ret;
+
+	if (!qproc->boost_cpus_during_boot)
+		return;
+
+	cancel_delayed_work_sync(&qproc->boot_qos_release);
+	q6v5_boot_qos_drop(qproc);
+
+	for_each_possible_cpu(cpu) {
+		if (qproc->boot_qos_count == Q6V5_BOOT_QOS_MAX_POLICIES)
+			break;
+		policy = cpufreq_cpu_get(cpu);
+		if (!policy)
+			continue;
+		if (policy->cpu == cpu) {
+			ret = freq_qos_add_request(&policy->constraints,
+						   &qproc->boot_qos[qproc->boot_qos_count],
+						   FREQ_QOS_MIN,
+						   policy->cpuinfo.max_freq);
+			if (ret >= 0)
+				qproc->boot_qos_count++;
+		}
+		cpufreq_cpu_put(policy);
+	}
+
+	schedule_delayed_work(&qproc->boot_qos_release,
+			      msecs_to_jiffies(Q6V5_BOOT_QOS_HOLD_MS));
+}
+
 static int q6v5_start(struct rproc *rproc)
 {
 	struct q6v5 *qproc = rproc->priv;
 	int xfermemop_ret;
 	int ret;
+
+	q6v5_boot_qos(qproc);
 
 	ret = q6v5_mba_load(qproc);
 	if (ret)
@@ -2111,6 +2181,9 @@ static int q6v5_probe(struct platform_device *pdev)
 
 	qproc = rproc->priv;
 	qproc->dev = &pdev->dev;
+	qproc->boost_cpus_during_boot =
+		of_property_read_bool(pdev->dev.of_node, "qcom,boost-cpus-during-boot");
+	INIT_DELAYED_WORK(&qproc->boot_qos_release, q6v5_boot_qos_release_work);
 	qproc->rproc = rproc;
 	qproc->hexagon_mdt_image = "modem.mdt";
 	ret = of_property_read_string_index(pdev->dev.of_node, "firmware-name",
@@ -2234,6 +2307,9 @@ static void q6v5_remove(struct platform_device *pdev)
 {
 	struct q6v5 *qproc = platform_get_drvdata(pdev);
 	struct rproc *rproc = qproc->rproc;
+
+	cancel_delayed_work_sync(&qproc->boot_qos_release);
+	q6v5_boot_qos_drop(qproc);
 
 	if (qproc->bam_dmux)
 		of_platform_device_destroy(&qproc->bam_dmux->dev, NULL);
