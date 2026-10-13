@@ -10,6 +10,7 @@
 #include <dt-bindings/firmware/qcom,scm.h>
 #include <dt-bindings/power/qcom-rpmpd.h>
 #include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/phy/phy-qcom-qmp.h>
 #include <dt-bindings/thermal/thermal.h>
 #include <dt-bindings/soc/qcom,apr.h>
 #include <dt-bindings/thermal/thermal.h>
@@ -3089,7 +3090,7 @@
 				snps,dis_u2_susphy_quirk;
 				snps,dis_enblslpm_quirk;
 				snps,parkmode-disable-ss-quirk;
-				phys = <&qusb2phy>, <&usb3phy>;
+				phys = <&qusb2phy>, <&usb3phy QMP_USB43DP_USB3_PHY>;
 				phy-names = "usb2-phy", "usb3-phy";
 				snps,has-lpm-erratum;
 				snps,hird-threshold = /bits/ 8 <0x10>;
@@ -3097,8 +3098,8 @@
 		};
 
 		usb3phy: phy@c010000 {
-			compatible = "qcom,msm8998-qmp-usb3-phy";
-			reg = <0x0c010000 0x1000>;
+			compatible = "qcom,msm8998-qmp-usb3-dp-phy";
+			reg = <0x0c010000 0x2000>;
 
 			clocks = <&gcc GCC_USB3_PHY_AUX_CLK>,
 				 <&gcc GCC_USB3_CLKREF_CLK>,
@@ -3109,15 +3110,20 @@
 				      "cfg_ahb",
 				      "pipe";
 			clock-output-names = "usb3_phy_pipe_clk_src";
-			#clock-cells = <0>;
-			#phy-cells = <0>;
+			#clock-cells = <1>;
+			#phy-cells = <1>;
 
-			resets = <&gcc GCC_USB3_PHY_BCR>,
-				 <&gcc GCC_USB3PHY_PHY_BCR>;
-			reset-names = "phy",
-				      "phy_phy";
+			resets = <&gcc GCC_USB3PHY_PHY_BCR>,
+				 <&gcc GCC_USB3_DP_PHY_BCR>,
+				 <&gcc GCC_USB3_PHY_BCR>;
+			reset-names = "phy_phy",
+				      "dp_phy",
+				      "phy";
 
-			qcom,tcsr-reg = <&tcsr_regs_2 0xb244>;
+			/* VLS clamp, USB3/DP PHY mode */
+			qcom,tcsr-reg = <&tcsr_regs_2 0xb244 0xb248>;
+
+			orientation-switch;
 
 			status = "disabled";
 		};
@@ -3684,8 +3690,8 @@
 				 <&mdss_dsi1_phy DSI_PIXEL_PLL_CLK>,
 				 <&mdss_dsi1_phy DSI_BYTE_PLL_CLK>,
 				 <&mdss_hdmi_phy>,
-				 <0>,
-				 <0>,
+				 <&usb3phy QMP_USB43DP_DP_LINK_CLK>,
+				 <&usb3phy QMP_USB43DP_DP_VCO_DIV_CLK>,
 				 <&gcc GCC_MMSS_GPLL0_DIV_CLK>;
 		};
 
@@ -3795,6 +3801,89 @@
 						dpu_intf3_out: endpoint {
 							remote-endpoint = <&hdmi_in>;
 						};
+					};
+
+					port@3 {
+						reg = <3>;
+
+						dpu_intf0_out: endpoint {
+							remote-endpoint = <&mdss_dp_in>;
+						};
+					};
+				};
+			};
+
+			mdss_dp: displayport-controller@c990000 {
+				compatible = "qcom,msm8998-dp";
+				reg = <0x0c990000 0x200>,
+				      <0x0c990200 0x200>,
+				      <0x0c990400 0x600>,
+				      <0x0c990a00 0x84>;
+
+				interrupt-parent = <&mdss>;
+				interrupts = <12>;
+
+				clocks = <&mmcc MDSS_AHB_CLK>,
+					 <&mmcc MDSS_DP_AUX_CLK>,
+					 <&mmcc MDSS_DP_LINK_CLK>,
+					 <&mmcc MDSS_DP_LINK_INTF_CLK>,
+					 <&mmcc MDSS_DP_PIXEL_CLK>;
+				clock-names = "core_iface",
+					      "core_aux",
+					      "ctrl_link",
+					      "ctrl_link_iface",
+					      "stream_pixel";
+				assigned-clocks = <&mmcc DP_LINK_CLK_SRC>,
+						  <&mmcc DP_PIXEL_CLK_SRC>;
+				assigned-clock-parents = <&usb3phy QMP_USB43DP_DP_LINK_CLK>,
+							 <&usb3phy QMP_USB43DP_DP_VCO_DIV_CLK>;
+
+				phys = <&usb3phy QMP_USB43DP_DP_PHY>;
+				phy-names = "dp";
+
+				operating-points-v2 = <&dp_opp_table>;
+				power-domains = <&rpmpd RPMPD_VDDCX>;
+
+				#sound-dai-cells = <0>;
+
+				status = "disabled";
+
+				ports {
+					#address-cells = <1>;
+					#size-cells = <0>;
+
+					port@0 {
+						reg = <0>;
+
+						mdss_dp_in: endpoint {
+							remote-endpoint = <&dpu_intf0_out>;
+						};
+					};
+
+					port@1 {
+						reg = <1>;
+
+						mdss_dp_out: endpoint {
+						};
+					};
+				};
+
+				dp_opp_table: opp-table {
+					compatible = "operating-points-v2";
+
+					opp-162000000 {
+						opp-hz = /bits/ 64 <162000000>;
+						required-opps = <&rpmpd_opp_low_svs>;
+					};
+
+					opp-270000000 {
+						opp-hz = /bits/ 64 <270000000>;
+						required-opps = <&rpmpd_opp_svs>;
+					};
+
+					opp-540000000 {
+						opp-hz = /bits/ 64 <540000000>;
+						required-opps = <&rpmpd_opp_nom>;
 					};
 				};
 			};
