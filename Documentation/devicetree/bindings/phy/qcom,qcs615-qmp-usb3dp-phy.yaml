@@ -4,7 +4,7 @@
 $id: http://devicetree.org/schemas/phy/qcom,qcs615-qmp-usb3dp-phy.yaml#
 $schema: http://devicetree.org/meta-schemas/core.yaml#
 
-title: Qualcomm QMP USB3-DP PHY controller (DP, QCS615)
+title: Qualcomm QMP USB3-DP PHY controller (DP, MSM8998, QCS615)
 
 maintainers:
   - Xiangxu Yin <xiangxu.yin@oss.qualcomm.com>
@@ -17,6 +17,7 @@ description:
 properties:
   compatible:
     enum:
+      - qcom,msm8998-qmp-usb3-dp-phy
       - qcom,qcs615-qmp-usb3-dp-phy
       - qcom,shikra-qmp-usb3-dp-phy
 
