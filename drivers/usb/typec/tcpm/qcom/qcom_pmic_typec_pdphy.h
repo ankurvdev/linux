@@ -20,12 +20,14 @@ struct pmic_typec_pdphy_irq_params {
 struct pmic_typec_pdphy_resources {
 	unsigned int				nr_irqs;
 	const struct pmic_typec_pdphy_irq_params	irq_params[PMIC_PDPHY_MAX_IRQS];
+	u8					trim3;
 };
 
 /* API */
 struct pmic_typec_pdphy;
 
 extern const struct pmic_typec_pdphy_resources pm8150b_pdphy_res;
+extern const struct pmic_typec_pdphy_resources pmi8998_pdphy_res;
 int qcom_pmic_typec_pdphy_probe(struct platform_device *pdev,
 				struct pmic_typec *tcpm,
 				const struct pmic_typec_pdphy_resources *res,

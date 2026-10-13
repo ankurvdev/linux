@@ -59,6 +59,10 @@
 
 #define USB_PDPHY_RX_BUFFER_REG		0x80
 
+#define USB_PDPHY_SEC_ACCESS_REG	0xD0
+#define SEC_ACCESS_UNLOCK		0xA5
+#define USB_PDPHY_TRIM_3_REG		0xF3
+
 /* VDD regulator */
 #define VDD_PDPHY_VOL_MIN		2800000	/* uV */
 #define VDD_PDPHY_VOL_MAX		3300000	/* uV */
@@ -603,6 +607,16 @@ int qcom_pmic_typec_pdphy_probe(struct platform_device *pdev,
 			return ret;
 	}
 
+	if (res->trim3) {
+		ret = regmap_write(regmap, base + USB_PDPHY_SEC_ACCESS_REG,
+				   SEC_ACCESS_UNLOCK);
+		if (!ret)
+			ret = regmap_write(regmap, base + USB_PDPHY_TRIM_3_REG,
+					   res->trim3);
+		if (ret)
+			return ret;
+	}
+
 	tcpm->pmic_typec_pdphy = pmic_typec_pdphy;
 
 	tcpm->tcpc.set_pd_rx = qcom_pmic_typec_pdphy_set_pd_rx;
@@ -615,36 +629,45 @@ int qcom_pmic_typec_pdphy_probe(struct platform_device *pdev,
 	return 0;
 }
 
+#define PM8150B_PDPHY_IRQS \
+	.irq_params = { \
+		{ \
+			.virq = PMIC_PDPHY_SIG_TX_IRQ, \
+			.irq_name = "sig-tx", \
+		}, \
+		{ \
+			.virq = PMIC_PDPHY_SIG_RX_IRQ, \
+			.irq_name = "sig-rx", \
+		}, \
+		{ \
+			.virq = PMIC_PDPHY_MSG_TX_IRQ, \
+			.irq_name = "msg-tx", \
+		}, \
+		{ \
+			.virq = PMIC_PDPHY_MSG_RX_IRQ, \
+			.irq_name = "msg-rx", \
+		}, \
+		{ \
+			.virq = PMIC_PDPHY_MSG_TX_FAIL_IRQ, \
+			.irq_name = "msg-tx-failed", \
+		}, \
+		{ \
+			.virq = PMIC_PDPHY_MSG_TX_DISCARD_IRQ, \
+			.irq_name = "msg-tx-discarded", \
+		}, \
+		{ \
+			.virq = PMIC_PDPHY_MSG_RX_DISCARD_IRQ, \
+			.irq_name = "msg-rx-discarded", \
+		}, \
+	}, \
+	.nr_irqs = 7
+
 const struct pmic_typec_pdphy_resources pm8150b_pdphy_res = {
-	.irq_params = {
-		{
-			.virq = PMIC_PDPHY_SIG_TX_IRQ,
-			.irq_name = "sig-tx",
-		},
-		{
-			.virq = PMIC_PDPHY_SIG_RX_IRQ,
-			.irq_name = "sig-rx",
-		},
-		{
-			.virq = PMIC_PDPHY_MSG_TX_IRQ,
-			.irq_name = "msg-tx",
-		},
-		{
-			.virq = PMIC_PDPHY_MSG_RX_IRQ,
-			.irq_name = "msg-rx",
-		},
-		{
-			.virq = PMIC_PDPHY_MSG_TX_FAIL_IRQ,
-			.irq_name = "msg-tx-failed",
-		},
-		{
-			.virq = PMIC_PDPHY_MSG_TX_DISCARD_IRQ,
-			.irq_name = "msg-tx-discarded",
-		},
-		{
-			.virq = PMIC_PDPHY_MSG_RX_DISCARD_IRQ,
-			.irq_name = "msg-rx-discarded",
-		},
-	},
-	.nr_irqs = 7,
+	PM8150B_PDPHY_IRQS,
+};
+
+/* PMI8998: same PHY, but the downstream driver sets this trim at probe */
+const struct pmic_typec_pdphy_resources pmi8998_pdphy_res = {
+	PM8150B_PDPHY_IRQS,
+	.trim3 = 0x02,
 };

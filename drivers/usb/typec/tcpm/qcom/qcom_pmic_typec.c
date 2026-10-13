@@ -149,7 +149,7 @@ static const struct pmic_typec_resources pmi632_typec_res = {
 
 static const struct pmic_typec_resources pmi8998_typec_res = {
 	/* Same PD PHY as PM8150B; Type-C lives in the SMB2 charger's USBIN */
-	.pdphy_res = &pm8150b_pdphy_res,
+	.pdphy_res = &pmi8998_pdphy_res,
 	.port_res = &pmi8998_port_res,
 };
 
