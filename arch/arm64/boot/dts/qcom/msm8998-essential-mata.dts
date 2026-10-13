@@ -1,0 +1,1266 @@
+// SPDX-License-Identifier: GPL-2.0
+/* Copyright (c) 2016, The Linux Foundation. All rights reserved. */
+
+/dts-v1/;
+
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/input/input.h>
+#include <dt-bindings/leds/common.h>
+#include <dt-bindings/pinctrl/qcom,pmic-gpio.h>
+#include <dt-bindings/sound/qcom,q6afe.h>
+#include <dt-bindings/sound/qcom,q6asm.h>
+#include <dt-bindings/sound/qcom,q6voice.h>
+#include <dt-bindings/sound/qcom,wcd9335.h>
+#include <dt-bindings/usb/pd.h>
+#include "msm8998.dtsi"
+#include "pm8005.dtsi"
+#include "pm8998.dtsi"
+#include "pmi8998.dtsi"
+
+/ {
+	model = "Essential PH-1";
+	compatible = "essential,mata", "qcom,msm8998";
+	chassis-type = "handset";
+        qcom,msm-id = <0x124 0x20001>;
+	qcom,board-id = <0x08 0x00>;
+	essential,hw-id = <0x00 0x07 0x00>;
+
+	aliases {
+		serial0 = &blsp2_uart1;
+		serial1 = &blsp1_uart3;
+	};
+
+	/*
+	 * Analog switch that connects the DP AUX channel to the USB-C SBU pins
+	 * (downstream: qcom,aux-en-gpio / qcom,aux-sel-gpio).
+	 */
+	sbu-mux {
+		compatible = "gpio-sbu-mux";
+
+		enable-gpios = <&tlmm 77 GPIO_ACTIVE_LOW>;
+		select-gpios = <&tlmm 78 GPIO_ACTIVE_HIGH>;
+
+		pinctrl-0 = <&dp_aux_switch>;
+		pinctrl-names = "default";
+
+		mode-switch;
+		orientation-switch;
+
+		port {
+			sbu_mux_in: endpoint {
+				remote-endpoint = <&pmi8998_typec_sbu>;
+			};
+		};
+	};
+
+	/*
+	 * WCD9335 MCLK: RPM DIV_CLK1 (9.6 MHz) out of PM8998 GPIO 13. Must be a child of the
+	 * root node (as on db820c): gpio-gate-clock is a platform driver, and children of
+	 * /clocks are not populated as platform devices.
+	 */
+	div1_mclk: divclk1 {
+		compatible = "gpio-gate-clock";
+		pinctrl-0 = <&audio_mclk_default>;
+		pinctrl-names = "default";
+		clocks = <&rpmcc RPM_SMD_DIV_CLK1>;
+		#clock-cells = <0>;
+		enable-gpios = <&pm8998_gpios 13 GPIO_ACTIVE_HIGH>;
+	};
+
+	chosen {
+		#address-cells = <2>;
+		#size-cells = <2>;
+		ranges;
+
+		/*
+		 * The bootloader's 1440 px wide splash buffer; only columns
+		 * 64..1375 are visible on the glass.
+		 */
+		framebuffer@9d400100 {
+			compatible = "simple-framebuffer";
+			reg = <0 (0x9d400000 + 64 * 4) 0 (1440 * 2560 * 4)>;
+			width = <1312>;
+			height = <2560>;
+			stride = <(1440 * 4)>;
+			format = "a8r8g8b8";
+		};
+	};
+
+	reserved-memory {
+		ipa_fws_mem: memory@f6900000 {
+			reg = <0 0xf6900000 0 0x10000>;
+			no-map;
+		};
+		cont_splash_mem: memory@9d400000 {
+			reg = <0 0x9d400000 0 0x2400000>;
+			no-map;
+		};
+		/*
+		 * Essential NV area: downstream (CONFIG_ESSENTIAL_NV) assigns it to
+		 * HLOS + modem before the MBA boots. qcom,rmtfs-mem is used only for
+		 * its identical SCM assignment; userspace rmtfs uses client 1 only.
+		 */
+		essential_nv_mem: memory@a0000000 {
+			compatible = "qcom,rmtfs-mem";
+			reg = <0 0xa0000000 0 0x800000>;
+			no-map;
+
+			qcom,client-id = <2>;
+			qcom,vmid = <QCOM_SCM_VMID_MSS_MSA>;
+		};
+
+		essential_mem: memory@a0a00000 {
+			reg = <0 0xa0a00000 0 0x200000>;
+			no-map;
+		};
+
+		ramoops@a0800000 {
+			compatible = "ramoops";
+			reg = <0 0xa0800000 0 0x200000>;
+			console-size = <0x80000>;
+			pmsg-size = <0x40000>;
+			record-size = <0x8000>;
+			ftrace-size = <0x20000>;
+		};
+
+		/* FastRPC buffers shared with the SLPI (no SMMU on its side) */
+		fastrpc_mem: fastrpc {
+			compatible = "shared-dma-pool";
+			alloc-ranges = <0x0 0x00000000 0x0 0xffffffff>;
+			alignment = <0x0 0x400000>;
+			size = <0x0 0x1000000>;
+			reusable;
+		};
+	};
+
+	smp2p-mpss {
+		ipa_smp2p_out: ipa-ap-to-modem {
+			qcom,entry-name = "ipa";
+			#qcom,smem-state-cells = <1>;
+		};
+
+		ipa_smp2p_in: ipa-modem-to-ap {
+			qcom,entry-name = "ipa";
+			interrupt-controller;
+			#interrupt-cells = <2>;
+		};
+	};
+
+	gpio-keys {
+		compatible = "gpio-keys";
+		label = "Volume keys";
+		pinctrl-0 = <&vol_keys_default>;
+		pinctrl-names = "default";
+
+		key-volume-up {
+			label = "Volume Up";
+			gpios = <&pm8998_gpios 6 GPIO_ACTIVE_LOW>;
+			linux,code = <KEY_VOLUMEUP>;
+			debounce-interval = <15>;
+			wakeup-source;
+		};
+
+		key-volume-down {
+			label = "Volume Down";
+			gpios = <&pm8998_gpios 10 GPIO_ACTIVE_LOW>;
+			linux,code = <KEY_VOLUMEDOWN>;
+			debounce-interval = <15>;
+			wakeup-source;
+		};
+	};
+
+	/* Values from the downstream mata_3040mah battery profile */
+	battery: battery {
+		compatible = "simple-battery";
+		device-chemistry = "lithium-ion";
+		charge-full-design-microamp-hours = <3040000>;
+		voltage-min-design-microvolt = <3400000>;
+		voltage-max-design-microvolt = <4400000>;
+		constant-charge-current-max-microamp = <2500000>;
+	};
+
+	sound {
+		compatible = "qcom,msm8998-sndcard";
+		model = "Essential-PH-1";
+
+		pinctrl-0 = <&quat_mi2s_default>;
+		pinctrl-names = "default";
+
+		/*
+		 * Microphone biases as in the downstream (Essential) sound card.
+		 * MCLK also clocks the TX path and the microphone biases.
+		 */
+		audio-routing = "RX_BIAS", "MCLK",
+				"AIF1 CAP", "MCLK",
+				"AMIC2", "MIC BIAS2",
+				"DMIC0", "MIC BIAS4",
+				"DMIC1", "MIC BIAS4",
+				"DMIC2", "MIC BIAS1",
+				"DMIC3", "MIC BIAS3",
+				"DMIC4", "MIC BIAS2",
+				"DMIC5", "MIC BIAS1";
+
+		/* Front ends: PCM devices 0-3, in this order */
+		mm1-dai-link {
+			link-name = "MultiMedia1";
+
+			cpu {
+				sound-dai = <&q6asmdai MSM_FRONTEND_DAI_MULTIMEDIA1>;
+			};
+		};
+
+		mm2-dai-link {
+			link-name = "MultiMedia2";
+
+			cpu {
+				sound-dai = <&q6asmdai MSM_FRONTEND_DAI_MULTIMEDIA2>;
+			};
+		};
+
+		mm3-dai-link {
+			link-name = "MultiMedia3";
+
+			cpu {
+				sound-dai = <&q6asmdai MSM_FRONTEND_DAI_MULTIMEDIA3>;
+			};
+		};
+
+		mm4-dai-link {
+			link-name = "MultiMedia4";
+
+			cpu {
+				sound-dai = <&q6asmdai MSM_FRONTEND_DAI_MULTIMEDIA4>;
+			};
+		};
+
+		/* Loudspeaker: TFA9891 on quaternary MI2S */
+		cs-voice-dai-link {
+			link-name = "CS-Voice";
+
+			cpu {
+				sound-dai = <&q6mvm CS_VOICE>;
+			};
+		};
+
+		quat-ec-dai-link {
+			link-name = "QUAT EC Capture";
+
+			cpu {
+				sound-dai = <&q6afedai QUATERNARY_MI2S_TX>;
+			};
+
+			platform {
+				sound-dai = <&q6routing>;
+			};
+		};
+
+		speaker-dai-link {
+			link-name = "Speaker Playback";
+
+			cpu {
+				sound-dai = <&q6afedai QUATERNARY_MI2S_RX>;
+			};
+
+			platform {
+				sound-dai = <&q6routing>;
+			};
+
+			codec {
+				sound-dai = <&speaker_amp>;
+			};
+		};
+
+		/* Earpiece (WCD9335 EAR) */
+		slim-dai-link {
+			link-name = "SLIM Playback";
+
+			cpu {
+				sound-dai = <&q6afedai SLIMBUS_0_RX>;
+			};
+
+			platform {
+				sound-dai = <&q6routing>;
+			};
+
+			codec {
+				sound-dai = <&wcd9335 AIF1_PB>;
+			};
+		};
+
+		/* Headphones (WCD9335 HPHL/HPHR) */
+		slim6-dai-link {
+			link-name = "SLIM6 Playback";
+
+			cpu {
+				sound-dai = <&q6afedai SLIMBUS_6_RX>;
+			};
+
+			platform {
+				sound-dai = <&q6routing>;
+			};
+
+			codec {
+				sound-dai = <&wcd9335 AIF4_PB>;
+			};
+		};
+
+		/* Microphones */
+		slimcap-dai-link {
+			link-name = "SLIM Capture";
+
+			cpu {
+				sound-dai = <&q6afedai SLIMBUS_0_TX>;
+			};
+
+			platform {
+				sound-dai = <&q6routing>;
+			};
+
+			codec {
+				sound-dai = <&wcd9335 AIF1_CAP>;
+			};
+		};
+	};
+
+	/* Userspace on/off switch for the 5 V OTG output (host mode, unpowered devices) */
+
+	vph_pwr: vph-pwr-regulator {
+		compatible = "regulator-fixed";
+		regulator-name = "vph_pwr";
+		regulator-always-on;
+		regulator-boot-on;
+	};
+};
+
+&adreno_gpu {
+	status = "okay";
+
+	zap-shader {
+		memory-region = <&gpu_mem>;
+		firmware-name = "a540_zap.mdt";
+	};
+};
+
+&gfx_mem_acc {
+	/* VDD_GFX is pinned above the 414 MHz corner, see &gpu_opp_table */
+	status = "okay";
+};
+
+&gpu_opp_table {
+	/*
+	 * VDD_GFX (pm8005_s1) has no CPR in mainline and is pinned at 772 mV.
+	 * Downstream's CPR keeps this unit (fuse rev 2) at or below its
+	 * open-loop voltages: 652/660/720 mV at 257/342/414 MHz, so 772 mV
+	 * leaves 52 mV of margin at 414 MHz, with mem-acc at the 414 MHz+
+	 * setting. (For any unit, downstream's ceilings at these corners are
+	 * 724/772/832 mV, 880 mV on fuse rev 0.) The faster OPPs need more
+	 * voltage, so they stay off.
+	 */
+	/delete-node/ opp-710000097;
+	/delete-node/ opp-670000048;
+	/delete-node/ opp-596000097;
+	/delete-node/ opp-515000097;
+};
+
+&blsp1_uart3 {
+	status = "okay";
+
+	bluetooth {
+		compatible = "qcom,wcn3990-bt";
+
+		vddio-supply = <&vreg_s4a_1p8>;
+		vddxo-supply = <&vreg_l7a_1p8>;
+		vddrf-supply = <&vreg_l17a_1p3>;
+		vddch0-supply = <&vreg_l25a_3p3>;
+		max-speed = <3200000>;
+
+		/*
+		 * Shared with Wi-Fi: without its own vote the clock goes off when
+		 * ath10k powers the WCN3990 down during probe, and Bluetooth stops
+		 * answering ~20 s after boot.
+		 */
+		clocks = <&rpmcc RPM_SMD_RF_CLK2_PIN>;
+
+		/*
+		 * The controller never answers the host's wake byte once it
+		 * has gone to in-band sleep (100 retries, no WAKE_ACK), so
+		 * Bluetooth died on the first command after ~20 s idle.
+		 */
+		qcom,no-inband-sleep;
+	};
+};
+
+&blsp1_uart3_on {
+	rx-pins {
+		/delete-property/ bias-disable;
+		/*
+		 * Configure a pull-up on 45 (RX). This is needed to
+		 * avoid garbage data when the TX pin of the Bluetooth
+		 * module is in tri-state (module powered off or not
+		 * driving the signal yet).
+		 */
+		bias-pull-up;
+	};
+
+	cts-pins {
+		/delete-property/ bias-disable;
+		/*
+		 * Configure a pull-down on 47 (CTS) to match the pull
+		 * of the Bluetooth module.
+		 */
+		bias-pull-down;
+	};
+};
+
+&blsp2_i2c3 {
+	status = "okay";
+
+	/* Loudspeaker amplifier */
+	speaker_amp: audio-codec@34 {
+		compatible = "nxp,tfa9891";
+		reg = <0x34>;
+		vddd-supply = <&vreg_s4a_1p8>;
+		sound-name-prefix = "Speaker";
+		#sound-dai-cells = <0>;
+	};
+};
+
+&blsp2_uart1 {
+	status = "okay";
+};
+
+&etf {
+	status = "okay";
+};
+
+&etm1 {
+	status = "okay";
+};
+
+&etm2 {
+	status = "okay";
+};
+
+&etm3 {
+	status = "okay";
+};
+
+&etm4 {
+	status = "okay";
+};
+
+&etm5 {
+	status = "okay";
+};
+
+&etm6 {
+	status = "okay";
+};
+
+&etm7 {
+	status = "okay";
+};
+
+&etm8 {
+	status = "okay";
+};
+
+&etr {
+	status = "okay";
+};
+
+&funnel1 {
+	status = "okay";
+};
+
+&funnel2 {
+	status = "okay";
+};
+
+&funnel3 {
+	status = "okay";
+};
+
+&funnel4 {
+	/* FIXME: Figure out why clock late_initcall crashes the board with this enabled. */
+};
+
+&funnel5 {
+	/* FIXME: Figure out why clock late_initcall crashes the board with this enabled. */
+};
+
+&pcie0 {
+	status = "disabled";
+};
+
+&ibb {
+	regulator-min-microvolt = <5500000>;
+	regulator-max-microvolt = <5500000>;
+};
+
+&lab {
+	regulator-min-microvolt = <5500000>;
+	regulator-max-microvolt = <5500000>;
+	qcom,soft-start-us = <800>;
+};
+
+&lpass_q6_smmu {
+	status = "okay";
+};
+
+&mdss {
+	status = "okay";
+};
+
+&mdss_dsi0 {
+	vdd-supply = <&vreg_l1a_0p875>;
+	vdda-supply = <&vreg_l2a_1p2>;
+
+	pinctrl-0 = <&panel_reset_n &mdp_vsync_te>;
+	pinctrl-names = "default";
+
+	status = "okay";
+
+	panel@0 {
+		compatible = "essential,mata-nt35597";
+		reg = <0>;
+
+		vddio-supply = <&vreg_l14a_1p88>;
+		avdd-supply = <&lab>;
+		avee-supply = <&ibb>;
+
+		reset-gpios = <&tlmm 94 GPIO_ACTIVE_LOW>;
+
+		backlight = <&pmi8998_wled>;
+
+		port {
+			panel_in: endpoint {
+				remote-endpoint = <&mdss_dsi0_out>;
+			};
+		};
+	};
+};
+
+&mdss_dsi0_out {
+	data-lanes = <0 1 2 3>;
+	remote-endpoint = <&panel_in>;
+};
+
+&mdss_dsi0_phy {
+	vdds-supply = <&vreg_l1a_0p875>;
+
+	status = "okay";
+};
+
+&pcie_phy {
+	status = "disabled";
+};
+
+&pm8998_gpios {
+	audio_mclk_default: audio-mclk-default-state {
+		pins = "gpio13";
+		function = "func2";
+		power-source = <0>;
+	};
+
+	vol_keys_default: vol-keys-default-state {
+		pins = "gpio6", "gpio10";
+		function = "normal";
+		input-enable;
+		bias-pull-up;
+		qcom,drive-strength = <PMIC_GPIO_STRENGTH_NO>;
+	};
+};
+
+&pm8005_regulators {
+	vdd_s1-supply = <&vph_pwr>;
+
+	pm8005_s1: s1 { /* VDD_GFX supply */
+		/* Fixed until GFX CPR exists; see &gpu_opp_table */
+		regulator-min-microvolt = <772000>;
+		regulator-max-microvolt = <772000>;
+		regulator-enable-ramp-delay = <500>;
+
+		/* Hack until we rig up the gpu consumer */
+		regulator-always-on;
+	};
+};
+
+&pmi8998_lsid0 {
+	/*
+	 * Same OTG block layout as PM8150B (CMD_OTG 0x40, current limit 0x52,
+	 * OTG_CFG 0x53 at 0x1100). The current-limit encoding differs: the
+	 * driver's 1.5 A setting (raw 2) means 750 mA on PMI8998.
+	 */
+	pmi8998_vbus: usb-vbus-regulator@1100 {
+		compatible = "qcom,pm8150b-vbus-reg";
+		reg = <0x1100>;
+		regulator-min-microamp = <1500000>;
+		regulator-max-microamp = <1500000>;
+	};
+};
+
+&pmi8998_charger {
+	monitored-battery = <&battery>;
+
+	status = "okay";
+};
+
+/* Rear dual-tone camera flash (channel 3 is not connected); currents from downstream */
+&pmi8998_flash {
+	status = "okay";
+
+	led-0 {
+		function = LED_FUNCTION_FLASH;
+		color = <LED_COLOR_ID_YELLOW>;
+		led-sources = <1>;
+		led-max-microamp = <100000>;
+		flash-max-microamp = <1000000>;
+		flash-max-timeout-us = <1280000>;
+	};
+
+	led-1 {
+		function = LED_FUNCTION_FLASH;
+		color = <LED_COLOR_ID_WHITE>;
+		led-sources = <2>;
+		led-max-microamp = <100000>;
+		flash-max-microamp = <1000000>;
+		flash-max-timeout-us = <1280000>;
+	};
+};
+
+/* LRA vibrator; downstream: actuator-type LRA, wave-play-rate 4255 us (~235 Hz) */
+&pmi8998_haptics {
+	qcom,wave-play-rate-us = <4255>;
+	status = "okay";
+};
+
+&pmi8998_typec {
+	vdd-pdphy-supply = <&vreg_l24a_3p075>;
+
+	status = "okay";
+
+	connector {
+		compatible = "usb-c-connector";
+
+		/*
+		 * Dual role: sources VBUS (and becomes USB host) for OTG
+		 * devices. The PMIC's hardware Try.SNK keeps it a sink on
+		 * chargers and DRP hosts.
+		 */
+		power-role = "dual";
+		data-role = "dual";
+		self-powered;
+
+		/* The OTG boost is limited to 750 mA */
+		source-pdos = <PDO_FIXED(5000, 500,
+					 PDO_FIXED_DUAL_ROLE |
+					 PDO_FIXED_USB_COMM |
+					 PDO_FIXED_DATA_SWAP)>;
+
+		sink-pdos = <PDO_FIXED(5000, 3000,
+				       PDO_FIXED_DUAL_ROLE |
+				       PDO_FIXED_USB_COMM |
+				       PDO_FIXED_DATA_SWAP)>;
+		op-sink-microwatt = <10000000>;
+
+		vbus-supply = <&pmi8998_vbus>;
+
+		/*
+		 * DFP_D, pin assignments C and E only: the QMP PHY runs either
+		 * USB3 or 4-lane DP, never both.
+		 */
+		altmodes {
+			displayport {
+				svid = /bits/ 16 <0xff01>;
+				vdo = <0x00001446>;
+			};
+		};
+
+		ports {
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			port@0 {
+				reg = <0>;
+
+				pmi8998_typec_hs: endpoint {
+					remote-endpoint = <&usb3_dwc3_hs>;
+				};
+			};
+
+			port@1 {
+				reg = <1>;
+				#address-cells = <1>;
+				#size-cells = <0>;
+
+				pmi8998_typec_ss: endpoint@0 {
+					reg = <0>;
+					remote-endpoint = <&usb3phy_ss_in>;
+				};
+
+				pmi8998_typec_dp: endpoint@1 {
+					reg = <1>;
+					remote-endpoint = <&mdss_dp_out>;
+				};
+			};
+
+			port@2 {
+				reg = <2>;
+
+				pmi8998_typec_sbu: endpoint {
+					remote-endpoint = <&sbu_mux_in>;
+				};
+			};
+		};
+	};
+};
+
+&pmi8998_fg {
+	monitored-battery = <&battery>;
+	power-supplies = <&pmi8998_charger>;
+
+	status = "okay";
+};
+
+&pmi8998_wled {
+	default-brightness = <800>;
+	qcom,switching-freq = <800>;
+	qcom,ovp-millivolt = <29600>;
+	qcom,current-boost-limit = <970>;
+	qcom,current-limit-microamp = <20000>;
+	qcom,enabled-strings = <0 1>;
+
+	status = "okay";
+};
+
+&q6afedai {
+	dai@22 {
+		reg = <QUATERNARY_MI2S_RX>;
+		qcom,sd-lines = <0>;
+	};
+
+	dai@23 {
+		/* Speaker amplifier feedback: echo reference for speakerphone calls */
+		reg = <QUATERNARY_MI2S_TX>;
+		qcom,sd-lines = <1>;
+	};
+};
+
+&q6asmdai {
+	dai@0 {
+		reg = <MSM_FRONTEND_DAI_MULTIMEDIA1>;
+		direction = <Q6ASM_DAI_RX>;
+	};
+
+	dai@1 {
+		reg = <MSM_FRONTEND_DAI_MULTIMEDIA2>;
+		direction = <Q6ASM_DAI_RX>;
+	};
+
+	dai@2 {
+		reg = <MSM_FRONTEND_DAI_MULTIMEDIA3>;
+		direction = <Q6ASM_DAI_RX>;
+	};
+
+	dai@3 {
+		reg = <MSM_FRONTEND_DAI_MULTIMEDIA4>;
+		direction = <Q6ASM_DAI_TX>;
+	};
+};
+
+&qusb2phy {
+	status = "okay";
+
+	vdd-supply = <&vreg_l1a_0p875>;
+	vdda-pll-supply = <&vreg_l12a_1p8>;
+	vdda-phy-dpdm-supply = <&vreg_l24a_3p075>;
+};
+
+&replicator1 {
+	status = "okay";
+};
+
+&rpm_requests {
+	regulators-0 {
+		compatible = "qcom,rpm-pm8998-regulators";
+
+		vdd_s1-supply = <&vph_pwr>;
+		vdd_s2-supply = <&vph_pwr>;
+		vdd_s3-supply = <&vph_pwr>;
+		vdd_s4-supply = <&vph_pwr>;
+		vdd_s5-supply = <&vph_pwr>;
+		vdd_s6-supply = <&vph_pwr>;
+		vdd_s7-supply = <&vph_pwr>;
+		vdd_s8-supply = <&vph_pwr>;
+		vdd_s9-supply = <&vph_pwr>;
+		vdd_s10-supply = <&vph_pwr>;
+		vdd_s11-supply = <&vph_pwr>;
+		vdd_s12-supply = <&vph_pwr>;
+		vdd_s13-supply = <&vph_pwr>;
+		vdd_l1_l27-supply = <&vreg_s7a_1p025>;
+		vdd_l2_l8_l17-supply = <&vreg_s3a_1p35>;
+		vdd_l3_l11-supply = <&vreg_s7a_1p025>;
+		vdd_l4_l5-supply = <&vreg_s7a_1p025>;
+		vdd_l6-supply = <&vreg_s5a_2p04>;
+		vdd_l7_l12_l14_l15-supply = <&vreg_s5a_2p04>;
+		vdd_l9-supply = <&vreg_bob>;
+		vdd_l10_l23_l25-supply = <&vreg_bob>;
+		vdd_l13_l19_l21-supply = <&vreg_bob>;
+		vdd_l16_l28-supply = <&vreg_bob>;
+		vdd_l18_l22-supply = <&vreg_bob>;
+		vdd_l20_l24-supply = <&vreg_bob>;
+		vdd_l26-supply = <&vreg_s3a_1p35>;
+		vdd_lvs1_lvs2-supply = <&vreg_s4a_1p8>;
+
+		vreg_s3a_1p35: s3 {
+			regulator-min-microvolt = <1352000>;
+			regulator-max-microvolt = <1352000>;
+		};
+
+		vreg_s4a_1p8: s4 {
+			regulator-min-microvolt = <1800000>;
+			regulator-max-microvolt = <1800000>;
+			regulator-allow-set-load;
+		};
+
+		vreg_s5a_2p04: s5 {
+			regulator-min-microvolt = <1904000>;
+			regulator-max-microvolt = <2040000>;
+		};
+
+		vreg_s7a_1p025: s7 {
+			regulator-min-microvolt = <900000>;
+			regulator-max-microvolt = <1028000>;
+		};
+
+		vreg_l1a_0p875: l1 {
+			regulator-min-microvolt = <880000>;
+			regulator-max-microvolt = <880000>;
+		};
+
+		vreg_l2a_1p2: l2 {
+			regulator-min-microvolt = <1200000>;
+			regulator-max-microvolt = <1200000>;
+		};
+
+		vreg_l3a_1p0: l3 {
+			regulator-min-microvolt = <1000000>;
+			regulator-max-microvolt = <1000000>;
+		};
+
+		vreg_l5a_0p8: l5 {
+			regulator-min-microvolt = <800000>;
+			regulator-max-microvolt = <800000>;
+		};
+
+		vreg_l6a_1p8: l6 {
+			regulator-min-microvolt = <1808000>;
+			regulator-max-microvolt = <1808000>;
+			/* touch controller (QTC800S, driven by the SLPI): digital supply */
+			regulator-always-on;
+		};
+
+		vreg_l7a_1p8: l7 {
+			regulator-min-microvolt = <1800000>;
+			regulator-max-microvolt = <1800000>;
+		};
+
+		vreg_l8a_1p2: l8 {
+			regulator-min-microvolt = <1200000>;
+			regulator-max-microvolt = <1200000>;
+		};
+
+		vreg_l9a_1p8: l9 {
+			regulator-min-microvolt = <1808000>;
+			regulator-max-microvolt = <2960000>;
+		};
+
+		vreg_l10a_1p8: l10 {
+			regulator-min-microvolt = <1808000>;
+			regulator-max-microvolt = <2960000>;
+		};
+
+		vreg_l11a_1p0: l11 {
+			regulator-min-microvolt = <1000000>;
+			regulator-max-microvolt = <1000000>;
+		};
+
+		vreg_l12a_1p8: l12 {
+			regulator-min-microvolt = <1800000>;
+			regulator-max-microvolt = <1800000>;
+		};
+
+		vreg_l13a_2p95: l13 {
+			regulator-min-microvolt = <1808000>;
+			regulator-max-microvolt = <2960000>;
+		};
+
+		vreg_l14a_1p88: l14 {
+			regulator-min-microvolt = <1880000>;
+			regulator-max-microvolt = <1880000>;
+		};
+
+		vreg_l15a_1p8: l15 {
+			regulator-min-microvolt = <1800000>;
+			regulator-max-microvolt = <1800000>;
+		};
+
+		vreg_l16a_2p7: l16 {
+			regulator-min-microvolt = <2704000>;
+			regulator-max-microvolt = <2704000>;
+		};
+
+		vreg_l17a_1p3: l17 {
+			regulator-min-microvolt = <1304000>;
+			regulator-max-microvolt = <1304000>;
+		};
+
+		vreg_l18a_2p7: l18 {
+			regulator-min-microvolt = <2704000>;
+			regulator-max-microvolt = <2704000>;
+		};
+
+		vreg_l19a_3p0: l19 {
+			regulator-min-microvolt = <3008000>;
+			regulator-max-microvolt = <3008000>;
+		};
+
+		vreg_l20a_2p95: l20 {
+			regulator-min-microvolt = <2960000>;
+			regulator-max-microvolt = <2960000>;
+			regulator-allow-set-load;
+		};
+
+		vreg_l21a_2p95: l21 {
+			regulator-min-microvolt = <2960000>;
+			regulator-max-microvolt = <2960000>;
+			regulator-system-load = <800000>;
+			regulator-allow-set-load;
+		};
+
+		vreg_l22a_2p85: l22 {
+			regulator-min-microvolt = <2864000>;
+			regulator-max-microvolt = <2864000>;
+		};
+
+		vreg_l23a_3p3: l23 {
+			regulator-min-microvolt = <3312000>;
+			regulator-max-microvolt = <3312000>;
+		};
+
+		vreg_l24a_3p075: l24 {
+			regulator-min-microvolt = <3088000>;
+			regulator-max-microvolt = <3088000>;
+		};
+
+		vreg_l25a_3p3: l25 {
+			regulator-min-microvolt = <3104000>;
+			regulator-max-microvolt = <3312000>;
+		};
+
+		vreg_l26a_1p2: l26 {
+			regulator-min-microvolt = <1200000>;
+			regulator-max-microvolt = <1200000>;
+			regulator-allow-set-load;
+		};
+
+		vreg_l28_3p0: l28 {
+			regulator-min-microvolt = <3008000>;
+			regulator-max-microvolt = <3008000>;
+			/* touch controller (QTC800S, driven by the SLPI): analog supply */
+			regulator-always-on;
+		};
+
+		vreg_lvs1a_1p8: lvs1 {
+			regulator-min-microvolt = <1800000>;
+			regulator-max-microvolt = <1800000>;
+		};
+
+		vreg_lvs2a_1p8: lvs2 {
+			regulator-min-microvolt = <1800000>;
+			regulator-max-microvolt = <1800000>;
+			/*
+			 * SLPI px supply (SSC I/O pads, e.g. the touch controller's SPI).
+			 * remoteproc drops its proxy vote at handover; downstream keeps it
+			 * on while the SLPI runs (qcom,keep-proxy-regs-on).
+			 */
+			regulator-always-on;
+		};
+
+	};
+
+	regulators-1 {
+		compatible = "qcom,rpm-pmi8998-regulators";
+
+		vdd_bob-supply = <&vph_pwr>;
+
+		vreg_bob: bob {
+			regulator-min-microvolt = <3312000>;
+			regulator-max-microvolt = <3600000>;
+		};
+	};
+};
+
+&remoteproc_adsp {
+	status = "okay";
+};
+
+&remoteproc_mss {
+	/* the modem boots silently while the OSM keeps the CPUs at low corners */
+	qcom,boost-cpus-during-boot;
+	status = "okay";
+};
+
+&remoteproc_slpi {
+	status = "okay";
+	firmware-name = "slpi_v2.mdt";
+
+	glink-edge {
+		/*
+		 * The touchscreen (QTC800S) is driven by the SLPI; userspace talks
+		 * to its touch code over FastRPC. Downstream (adsprpc.c) shares
+		 * SDSP buffers between HLOS and VMID 38, the SSC Q6 on MSM8998
+		 * (QCOM_SCM_VMID_SSC_Q6 = 5 is the SDM845 numbering).
+		 */
+		fastrpc {
+			compatible = "qcom,fastrpc";
+			qcom,glink-channels = "fastrpcglink-apps-dsp";
+			label = "sdsp";
+			qcom,non-secure-domain;
+			qcom,vmids = <QCOM_SCM_VMID_HLOS 38>;
+			memory-region = <&fastrpc_mem>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			compute-cb@0 {
+				compatible = "qcom,fastrpc-compute-cb";
+				reg = <0>;
+				/*
+				 * libadsprpc keeps more than one fd open (rpcmem,
+				 * capability queries); downstream allows any number
+				 */
+				qcom,nsessions = <4>;
+			};
+		};
+	};
+};
+
+&slim {
+	status = "okay";
+
+	slim@1 {
+		reg = <1>;
+		#address-cells = <2>;
+		#size-cells = <0>;
+
+		tasha_ifd: tas-ifd@0,0 {
+			compatible = "slim217,1a0";
+			reg = <0 0>;
+		};
+
+		wcd9335: codec@1,0 {
+			compatible = "slim217,1a0";
+			reg = <1 0>;
+
+			/* The driver only looks up the "slimbus" clock */
+			clocks = <&div1_mclk>, <&rpmcc RPM_SMD_XO_CLK_SRC>;
+			clock-names = "mclk", "slimbus";
+
+			interrupts-extended = <&tlmm 54 IRQ_TYPE_LEVEL_HIGH>,
+					      <&tlmm 53 IRQ_TYPE_LEVEL_HIGH>;
+			interrupt-names = "intr1", "intr2";
+			interrupt-controller;
+			#interrupt-cells = <1>;
+
+			reset-gpios = <&tlmm 64 GPIO_ACTIVE_LOW>;
+
+			pinctrl-0 = <&wcd_int_default &cdc_reset_n_default>;
+			pinctrl-names = "default";
+
+			slim-ifc-dev = <&tasha_ifd>;
+
+			vdd-buck-supply = <&vreg_s4a_1p8>;
+			vdd-buck-sido-supply = <&vreg_s4a_1p8>;
+			vdd-tx-supply = <&vreg_s4a_1p8>;
+			vdd-rx-supply = <&vreg_s4a_1p8>;
+			vdd-io-supply = <&vreg_s4a_1p8>;
+
+			#sound-dai-cells = <1>;
+		};
+	};
+};
+
+&slimbam {
+	status = "okay";
+};
+
+&tlmm {
+	gpio-reserved-ranges = <0 4>, <81 4>;
+
+	dp_aux_switch: dp-aux-switch-state {
+		pins = "gpio77", "gpio78";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-disable;
+	};
+
+	cdc_reset_n_default: cdc-reset-n-default-state {
+		pins = "gpio64";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-disable;
+		output-high;
+	};
+
+	mdp_vsync_te: mdp-vsync-te-state {
+		pins = "gpio10";
+		function = "mdp_vsync_a";
+		drive-strength = <2>;
+		bias-disable;
+	};
+
+	panel_reset_n: panel-reset-n-state {
+		pins = "gpio94";
+		function = "gpio";
+		drive-strength = <8>;
+		bias-disable;
+	};
+
+	/* SCK, WS, DATA0 (to the TFA9891), DATA1 (from the TFA9891) */
+	quat_mi2s_default: quat-mi2s-default-state {
+		pins = "gpio58", "gpio59", "gpio60", "gpio61";
+		function = "qua_mi2s";
+		drive-strength = <8>;
+		bias-disable;
+	};
+
+	wcd_int_default: wcd-int-default-state {
+		pins = "gpio54";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-disable;
+	};
+};
+
+&sdhc2 {
+	status = "disabled";
+	cd-gpios = <&tlmm 95 GPIO_ACTIVE_LOW>;
+
+	vmmc-supply = <&vreg_l21a_2p95>;
+	vqmmc-supply = <&vreg_l13a_2p95>;
+
+	pinctrl-names = "default", "sleep";
+	pinctrl-0 = <&sdc2_on &sdc2_cd>;
+	pinctrl-1 = <&sdc2_off &sdc2_cd>;
+};
+
+&stm {
+	status = "okay";
+};
+
+&ufshc {
+	status = "okay";
+	vcc-supply = <&vreg_l20a_2p95>;
+	vccq-supply = <&vreg_l26a_1p2>;
+	vccq2-supply = <&vreg_s4a_1p8>;
+	vdd-hba-supply = <&vreg_l26a_1p2>;
+	vcc-max-microamp = <750000>;
+	vccq-max-microamp = <560000>;
+	vccq2-max-microamp = <750000>;
+};
+
+&ufsphy {
+	status = "okay";
+	vdda-phy-supply = <&vreg_l1a_0p875>;
+	vdda-pll-supply = <&vreg_l2a_1p2>;
+};
+
+&usb3 {
+	/* USB 2 only (the QMP PHY belongs to DP): clock the pipe from UTMI */
+	qcom,select-utmi-as-pipe-clk;
+
+	status = "okay";
+};
+
+&usb3_dwc3 {
+	/*
+	 * The role comes from TCPM (PMI8998 Type-C). USB 2 only: the QMP PHY's
+	 * lanes are left to DisplayPort.
+	 */
+	phys = <&qusb2phy>;
+	phy-names = "usb2-phy";
+
+	dr_mode = "otg";
+	usb-role-switch;
+	role-switch-default-mode = "peripheral";
+	maximum-speed = "high-speed";
+
+	port {
+		usb3_dwc3_hs: endpoint {
+			remote-endpoint = <&pmi8998_typec_hs>;
+		};
+	};
+};
+
+&usb3phy {
+	status = "okay";
+
+	vdda-phy-supply = <&vreg_l1a_0p875>;
+	vdda-pll-supply = <&vreg_l2a_1p2>;
+
+	ports {
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		port@0 {
+			reg = <0>;
+
+			usb3phy_ss_in: endpoint {
+				remote-endpoint = <&pmi8998_typec_ss>;
+			};
+		};
+	};
+};
+
+&mdss_dp {
+	status = "okay";
+};
+
+&mdss_dp_out {
+	data-lanes = <0 1 2 3>;
+	link-frequencies = /bits/ 64 <1620000000 2700000000 5400000000>;
+	remote-endpoint = <&pmi8998_typec_dp>;
+};
+
+&wifi {
+	status = "okay";
+
+	vdd-0.8-cx-mx-supply = <&vreg_l5a_0p8>;
+	vdd-1.8-xo-supply = <&vreg_l7a_1p8>;
+	vdd-1.3-rfa-supply = <&vreg_l17a_1p3>;
+	vdd-3.3-ch0-supply = <&vreg_l25a_3p3>;
+};
+
+&soc {
+	ipa: ipa@1e40000 {
+		compatible = "qcom,msm8998-ipa";
+		iommus = <&anoc2_smmu 0x18e0>;
+		reg = <0x01e40000 0x7000>,
+		      <0x01e47000 0x2000>,
+		      <0x01e04000 0x2c000>;
+		reg-names = "ipa-reg", "ipa-shared", "gsi";
+		interrupts-extended = <&intc GIC_SPI 333 IRQ_TYPE_EDGE_RISING>,
+				      <&intc GIC_SPI 432 IRQ_TYPE_LEVEL_HIGH>,
+				      <&ipa_smp2p_in 0 IRQ_TYPE_EDGE_RISING>,
+				      <&ipa_smp2p_in 1 IRQ_TYPE_EDGE_RISING>;
+		interrupt-names = "ipa", "gsi", "ipa-clock-query", "ipa-setup-ready";
+		clocks = <&rpmcc RPM_SMD_IPA_CLK>;
+		clock-names = "core";
+		qcom,smem-states = <&ipa_smp2p_out 0>, <&ipa_smp2p_out 1>;
+		qcom,smem-state-names = "ipa-clock-enabled-valid", "ipa-clock-enabled";
+		qcom,gsi-loader = "self";
+		memory-region = <&ipa_fws_mem>;
+		firmware-name = "ipa_fws.mdt";
+	};
+};
